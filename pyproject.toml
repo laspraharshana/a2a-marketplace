@@ -84,6 +84,16 @@ dev = [
     "mypy>=1.10.0",             # Type checker
 ]
 
+[tool.setuptools.packages.find]
+# Tell setuptools to ONLY look in these directories
+# This fixes the "multiple top-level packages" error
+include = [
+    "shared*",
+    "agents*",
+    "registry*",
+    "orchestrator*",
+]
+
 [tool.ruff]
 line-length = 88
 target-version = "py312"

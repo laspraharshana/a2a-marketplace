@@ -1,0 +1,155 @@
+# ══════════════════════════════════════════════════════════════
+# ENVIRONMENT & SECRETS
+# ══════════════════════════════════════════════════════════════
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+!.env.example          # Keep the example file
+
+# ══════════════════════════════════════════════════════════════
+# PYTHON
+# ══════════════════════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ══════════════════════════════════════════════════════════════
+# TESTING & COVERAGE
+# ══════════════════════════════════════════════════════════════
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.coveragerc
+.tox/
+.nox/
+
+# ══════════════════════════════════════════════════════════════
+# TYPE CHECKING & LINTING
+# ══════════════════════════════════════════════════════════════
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# ══════════════════════════════════════════════════════════════
+# DOCKER
+# ══════════════════════════════════════════════════════════════
+# Keep Dockerfiles and docker-compose.yml
+# Ignore runtime artifacts
+*.log
+docker-compose.override.yml  # Local overrides
+
+# ══════════════════════════════════════════════════════════════
+# DATABASE
+# ══════════════════════════════════════════════════════════════
+*.db
+*.sqlite
+*.sqlite3
+*.sql.backup
+
+# Alembic - keep migrations, ignore cache
+alembic/__pycache__/
+
+# ══════════════════════════════════════════════════════════════
+# IDE & EDITORS
+# ══════════════════════════════════════════════════════════════
+# VS Code - keep shared settings, ignore personal
+.vscode/*
+!.vscode/extensions.json    # Share recommended extensions
+!.vscode/settings.json      # Share project settings
+.vscode/launch.json         # Personal debug configs
+
+# JetBrains (PyCharm etc)
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ══════════════════════════════════════════════════════════════
+# OS GENERATED
+# ══════════════════════════════════════════════════════════════
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+
+# ══════════════════════════════════════════════════════════════
+# PROJECT SPECIFIC
+# ══════════════════════════════════════════════════════════════
+# Generated charts/visualizations from Data Analysis Agent
+agents/data_analysis/outputs/
+agents/document/uploads/
+agents/code/sandbox/
+
+# MCP server logs
+*.mcp.log
+
+# OpenTelemetry local exports
+telemetry_export/
+
+# Task history dumps (use DB instead)
+task_dumps/
+
+# Demo videos (too large for git)
+docs/demo_videos/
+*.mp4
+*.mov
+
+# Temporary test files
+tmp/
+temp/
+scratch/
+
+# API response mocks (generated, not handwritten)
+tests/mocks/generated/
+
+# ══════════════════════════════════════════════════════════════
+# KEEP THESE (explicit whitelist for clarity)
+# ══════════════════════════════════════════════════════════════
+!.env.example
+!docker-compose.yml
+!docker-compose.dev.yml
+!Dockerfile
+!requirements*.txt          # If you generate these
+!alembic/versions/*.py      # DB migration files
+!tests/mocks/fixtures/      # Handwritten test fixtures

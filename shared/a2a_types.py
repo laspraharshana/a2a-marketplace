@@ -12,8 +12,7 @@ from enum import Enum
 from typing import Any, Literal, Union
 from pydantic import BaseModel, Field
 import uuid
-from datetime import datetime
-
+from datetime import datetime, timezone
 
 # ══════════════════════════════════════════════════════════════
 # ENUMS
@@ -120,8 +119,10 @@ class Artifact(BaseModel):
 class TaskStatus(BaseModel):
     """Current status of a task"""
     state: TaskState
-    message: Message | None = None  # Status update message
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    message: Message | None = None
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 class Task(BaseModel):

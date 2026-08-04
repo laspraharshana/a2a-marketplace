@@ -1,11 +1,4 @@
 # CLAUDE_CONTEXT.md
-#
-# PURPOSE: Paste this entire file at the START of
-# every new Claude conversation about this project.
-# This replaces Claude's memory across sessions.
-#
-# KEEP THIS UPDATED after every work session.
-# ══════════════════════════════════════════════════
 
 ## PROJECT IDENTITY
 - Name: A2A Multi-Agent Marketplace System

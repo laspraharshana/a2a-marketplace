@@ -1,11 +1,5 @@
 # CLAUDE_CONTEXT.md
-#
-# PURPOSE: Paste this entire file at the START of
-# every new Claude conversation about this project.
-# This replaces Claude's memory across sessions.
-#
-# KEEP THIS UPDATED after every work session.
-# ══════════════════════════════════════════════════
+
 
 ## PROJECT IDENTITY
 - Name: A2A Multi-Agent Marketplace System
@@ -244,6 +238,17 @@ Services and their ports:
 - PostgreSQL:            localhost:5432
 - Redis:                 localhost:6379
 
+
+## CRITICAL SDK NOTES
+
+### Port field names in settings (exact names — no typos):
+- settings.web_search_agent_port     → 8001
+- settings.data_analysis_agent_port  → 8002
+- settings.document_agent_port       → 8003
+- settings.code_agent_port           → 8004
+- settings.orchestrator_port         → 8000
+- settings.registry_port             → 9000
+
 ## CURRENT BUILD PHASE
 Phase: Week 2 — START
 Currently building: Base A2A agent class → Data Analysis Agent
@@ -267,9 +272,9 @@ Last completed: Web Search Agent (Week 1)
 - [ ] registry/main.py
 
 ### Base Agent Framework
-- [ ] agents/base/a2a_server.py
-- [ ] agents/base/agent_card.py
-
+- [x] agents/base/a2a_server.py     ← Built in Week 2
+- [x] agents/base/agent_card.py     ← ELIMINATED (YAGNI) AgentCard lives in shared/a2a_types.py.Instances in each agent's main.py.
+                                                         
 ### Web Search Agent ✅ COMPLETE
 - [x] agents/web_search/tools.py
 - [x] agents/web_search/mcp_server.py

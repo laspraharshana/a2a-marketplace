@@ -1,6 +1,5 @@
 # CLAUDE_CONTEXT.md
 
-
 ## PROJECT IDENTITY
 - Name: A2A Multi-Agent Marketplace System
 - Repo: https://github.com/YOURUSERNAME/a2a-marketplace

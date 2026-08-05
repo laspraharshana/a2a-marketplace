@@ -28,7 +28,8 @@
         MCPServer IS the replacement for FastMCP.
 - Agent Framework: LangGraph (orchestrator only, not agents)
 - Web Framework: FastAPI (each agent is a microservice)
-- Database: PostgreSQL + asyncpg + SQLAlchemy 2.0
+- Database: PostgreSQL + asyncpg (NO SQLAlchemy ORM)
+  Raw asyncpg pool directly — simpler, faster for this scale
 - Cache: Redis
 - Observability: OpenTelemetry
 - Logging: structlog
@@ -137,6 +138,24 @@ def verify_bearer_token(
     return credentials.credentials
 ```
 
+### BaseA2AAgent auth dependency pattern:
+```python
+# build_app() creates auth_dependency as instance-bound closure.
+# Tests override via: app.dependency_overrides[_agent.auth_dependency]
+# NOT a module-level function — each agent instance has its own reference.
+
+def auth_dependency(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> str:
+    return verify_bearer_token(credentials)
+
+agent.auth_dependency = auth_dependency  # stored on instance
+
+# In test fixture:
+app.dependency_overrides[_agent.auth_dependency] = lambda: "test-token"
+app.dependency_overrides.clear()  # ALWAYS clean up after test
+```
+
 ### datetime deprecation fix:
 ```python
 # WRONG (deprecated):
@@ -146,6 +165,88 @@ default_factory=datetime.utcnow
 # CORRECT:
 from datetime import datetime, timezone
 default_factory=lambda: datetime.now(timezone.utc)
+```
+
+### model_dump(mode="json") required for datetime serialization:
+```python
+# JSONResponse uses stdlib json.dumps — no datetime handler.
+# Pydantic model_dump() returns datetime objects by default.
+# WRONG:
+return JSONRPCResponse(
+    id=rpc_id,
+    result=task.model_dump(),
+).model_dump()
+
+# CORRECT — mode="json" converts datetime → ISO string:
+return JSONRPCResponse(
+    id=rpc_id,
+    result=task.model_dump(mode="json"),
+).model_dump(mode="json")
+# Apply to ALL .model_dump() calls that go into JSONResponse
+```
+
+### asyncio.to_thread requires sync functions:
+```python
+# WRONG — async wrapper sent to thread pool:
+async def _run():
+    exec(code)
+await asyncio.to_thread(_run)  # coroutine never awaited, silent failure
+
+# CORRECT — sync function directly:
+def _run_sync():
+    exec(code)
+await asyncio.to_thread(_run_sync)
+```
+
+### Python sandbox __import__ blocking:
+```python
+# Dict restriction on __builtins__ alone does NOT block imports.
+# Must explicitly add __import__ blocker:
+def _blocked_import(name: str, *args, **kwargs):
+    raise ImportError(f"Import of '{name}' is blocked in sandbox")
+
+_SAFE_BUILTINS = {
+    "__import__": _blocked_import,  # REQUIRED — blocks all imports
+    "abs": abs,
+    # ... rest of safe builtins
+}
+# Pre-load safe modules into exec namespace instead:
+exec_globals = {
+    "__builtins__": _SAFE_BUILTINS,
+    "numpy": np, "np": np,
+    "pandas": pd, "pd": pd,
+    "math": math,
+    # etc.
+}
+```
+
+### asyncpg JSONB behavior:
+```python
+# asyncpg returns JSONB columns as JSON strings, NOT dicts.
+# Must json.loads() after fetching from DB.
+# Use isinstance guard so unit tests (which pass dicts) still work:
+
+agent_card = row["agent_card"] or "{}"
+if isinstance(agent_card, str):
+    agent_card = json.loads(agent_card)
+
+# Also: when inserting JSONB, must serialize to string first:
+agent_card_json = json.dumps(request.agent_card)
+await conn.execute("INSERT ... ($1::jsonb)", agent_card_json)
+```
+
+### FastAPI app.state in tests:
+```python
+# WRONG — lifespan override silently fails after app creation:
+app.router.lifespan_context = mock_lifespan  # has no effect
+
+# CORRECT — inject state directly before requests:
+app.state.pool = MagicMock()      # unit tests (no real DB)
+app.state.pool = real_pool        # integration tests (real DB)
+
+# Clean up after yield:
+if hasattr(app.state, "pool"):
+    del app.state.pool
 ```
 
 ### ddgs rate limiting fix:
@@ -190,28 +291,9 @@ if not final_text and all_tool_results:
     )
 ```
 
-### Test auth override pattern:
-```python
-from agents.web_search.main import app, verify_bearer_token
-
-def override_verify_bearer_token() -> str:
-    return "test-token"
-
-@pytest_asyncio.fixture
-async def auth_client(self):
-    app.dependency_overrides[verify_bearer_token] = \
-        override_verify_bearer_token
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test"
-    ) as ac:
-        yield ac
-    app.dependency_overrides.clear()  # ALWAYS clean up after test
-```
-
 ### A2A endpoint structure (every agent uses this):
 ```python
-# 4 endpoints every A2A agent must have:
+# 5 endpoints every A2A agent must have:
 GET  /.well-known/agent.json  # PUBLIC — no auth — Agent Card
 GET  /health                   # PUBLIC — no auth
 POST /a2a/tasks/send           # AUTH required
@@ -226,34 +308,83 @@ POST /a2a/tasks/cancel         # AUTH required
 #       ONLY auth failures use HTTP 401
 ```
 
+### AgentCard field names (exact — no typos):
+```python
+# provider uses "organization" not "name":
+provider={"organization": "A2A Marketplace", "url": "http://localhost"}
+
+# AgentSkill is a Pydantic model — use attribute access not dict:
+skill_ids = [s.id for s in card.skills]   # CORRECT
+skill_ids = [s["id"] for s in card.skills]  # WRONG — TypeError
+```
+
+### Port field names in settings (exact — no typos):
+```python
+settings.web_search_agent_port     # → 8001
+settings.data_analysis_agent_port  # → 8002
+settings.document_agent_port       # → 8003
+settings.code_agent_port           # → 8004
+settings.orchestrator_port         # → 8000
+settings.registry_port             # → 9000
+```
+
+### Gemini tool declarations format:
+```python
+# Key is "parameters" (Gemini format), NOT "inputSchema" (MCP format)
+{
+    "name": "tool_name",
+    "description": "...",
+    "parameters": {          # NOT "inputSchema"
+        "type": "object",
+        "properties": {...},
+        "required": [...],
+    }
+}
+```
+
+### pytest integration marks — register in pyproject.toml:
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests requiring live services (PostgreSQL etc.)",
+]
+```
+
 ## ARCHITECTURE OVERVIEW
 Services and their ports:
-- Agent Registry:        localhost:9000
+- Agent Registry:        localhost:9000  ✅ COMPLETE
 - Orchestrator Agent:    localhost:8000
 - Web Search Agent:      localhost:8001  ✅ COMPLETE
-- Data Analysis Agent:   localhost:8002
+- Data Analysis Agent:   localhost:8002  ✅ COMPLETE
 - Document Agent:        localhost:8003
 - Code Agent:            localhost:8004
-- PostgreSQL:            localhost:5432
+- PostgreSQL:            localhost:5432  ✅ INSTALLED (local WSL2)
 - Redis:                 localhost:6379
 
-
-## CRITICAL SDK NOTES
-
-### Port field names in settings (exact names — no typos):
-- settings.web_search_agent_port     → 8001
-- settings.data_analysis_agent_port  → 8002
-- settings.document_agent_port       → 8003
-- settings.code_agent_port           → 8004
-- settings.orchestrator_port         → 8000
-- settings.registry_port             → 9000
+PostgreSQL credentials:
+  user: a2a
+  password: a2a_password
+  database: a2a_marketplace
+  url: postgresql://a2a:a2a_password@localhost:5432/a2a_marketplace
+  Start: sudo service postgresql start
 
 ## CURRENT BUILD PHASE
-Phase: Week 2 — START
-Currently building: Base A2A agent class → Data Analysis Agent
-Last completed: Web Search Agent (Week 1)
-                25/25 tests passing
-                Live Gemini API + tool calling confirmed working
+Phase: Week 3
+Currently building: Document Agent → Code Agent
+Last completed: Week 2 — all components done
+
+Week 2 completed:
+- BaseA2AAgent (agents/base/a2a_server.py)
+- Data Analysis Agent (agents/data_analysis/) — 40/40 tests
+- Agent Registry (registry/) — 33/33 tests
+  - 29 unit/DB tests
+  - 4 integration tests (@pytest.mark.integration)
+- Registry auto-registration wired into BaseA2AAgent
+
+Running test total: 98 tests, all passing
+  25  tests/test_web_search_mcp.py
+  40  tests/test_data_analysis.py
+  33  tests/test_registry.py
 
 ## COMPLETED COMPONENTS
 
@@ -265,15 +396,18 @@ Last completed: Web Search Agent (Week 1)
 - [x] shared/config.py
 - [x] shared/logging_config.py
 
-### Agent Registry
-- [ ] registry/models.py
-- [ ] registry/database.py
-- [ ] registry/main.py
+### Agent Registry ✅ COMPLETE
+- [x] registry/models.py
+- [x] registry/database.py
+- [x] registry/main.py
+- [x] tests/test_registry.py (33/33 passing)
 
-### Base Agent Framework
-- [x] agents/base/a2a_server.py     ← Built in Week 2
-- [x] agents/base/agent_card.py     ← ELIMINATED (YAGNI) AgentCard lives in shared/a2a_types.py.Instances in each agent's main.py.
-                                                         
+### Base Agent Framework ✅ COMPLETE
+- [x] agents/base/a2a_server.py
+- [N/A] agents/base/agent_card.py — eliminated (YAGNI)
+        AgentCard lives in shared/a2a_types.py
+        Instances defined in each agent's main.py
+
 ### Web Search Agent ✅ COMPLETE
 - [x] agents/web_search/tools.py
 - [x] agents/web_search/mcp_server.py
@@ -281,35 +415,36 @@ Last completed: Web Search Agent (Week 1)
 - [x] tests/test_web_search_mcp.py (25/25 passing)
 - [ ] agents/web_search/Dockerfile  ← Week 6
 
-### Data Analysis Agent
-- [ ] agents/data_analysis/tools.py
-- [ ] agents/data_analysis/mcp_server.py
-- [ ] agents/data_analysis/main.py
-- [ ] agents/data_analysis/Dockerfile
+### Data Analysis Agent ✅ COMPLETE
+- [x] agents/data_analysis/tools.py
+- [x] agents/data_analysis/mcp_server.py
+- [x] agents/data_analysis/main.py
+- [x] tests/test_data_analysis.py (40/40 passing)
+- [ ] agents/data_analysis/Dockerfile  ← Week 6
 
 ### Document Agent
 - [ ] agents/document/tools.py
 - [ ] agents/document/mcp_server.py
 - [ ] agents/document/main.py
-- [ ] agents/document/Dockerfile
+- [ ] agents/document/Dockerfile  ← Week 6
 
 ### Code Agent
 - [ ] agents/code/tools.py
 - [ ] agents/code/mcp_server.py
 - [ ] agents/code/main.py
-- [ ] agents/code/Dockerfile
+- [ ] agents/code/Dockerfile  ← Week 6
 
 ### Orchestrator
 - [ ] orchestrator/a2a_client.py
 - [ ] orchestrator/task_decomposer.py
 - [ ] orchestrator/agent.py
 - [ ] orchestrator/main.py
-- [ ] orchestrator/Dockerfile
+- [ ] orchestrator/Dockerfile  ← Week 6
 
 ### Infrastructure Files
-- [ ] docker-compose.yml
-- [ ] docker-compose.dev.yml
-- [ ] alembic migrations
+- [ ] docker-compose.yml  ← Week 6
+- [ ] docker-compose.dev.yml  ← Week 6
+- [ ] alembic migrations  ← Week 6
 
 ### Observability
 - [ ] shared/telemetry.py
@@ -317,8 +452,10 @@ Last completed: Web Search Agent (Week 1)
 
 ### Tests
 - [x] tests/test_web_search_mcp.py (25 tests)
-- [ ] tests/test_registry.py
-- [ ] tests/test_data_analysis.py
+- [x] tests/test_data_analysis.py (40 tests)
+- [x] tests/test_registry.py (33 tests)
+- [ ] tests/test_document.py
+- [ ] tests/test_code.py
 - [ ] tests/test_orchestrator.py
 - [ ] tests/test_e2e.py
 
@@ -350,6 +487,12 @@ Last completed: Web Search Agent (Week 1)
              Manual error handling required.
              Tests use dependency_overrides to bypass auth.
 
+2026-08-02 - BaseA2AAgent auth_dependency as instance attribute
+             Reason: Each agent's build_app() creates a closure
+             stored on the instance. Tests reference it as
+             _agent.auth_dependency for dependency_overrides.
+             Avoids module-level function collision between agents.
+
 2026-08-03 - Gemini models locked (see GEMINI MODELS section)
              Reason: Only these work on this free tier account.
 
@@ -358,8 +501,28 @@ Last completed: Web Search Agent (Week 1)
 
 2026-08-03 - Fallback synthesis pattern added
              Reason: DDG rate limits after first query.
-             Gemini exhausts 5 iterations with empty results.
+             Gemini exhausts iterations with empty results.
              Fix: collect results, force synthesis at end.
+
+2026-08-04 - Raw asyncpg over SQLAlchemy ORM
+             Reason: Registry has ~5 queries total.
+             asyncpg is faster, simpler, less abstraction.
+             SQLAlchemy async adds session complexity for no gain.
+
+2026-08-04 - JSONB returned as string by asyncpg
+             Reason: asyncpg does not auto-decode JSONB to dict.
+             Fix: json.loads() in from_db_row() with isinstance
+             guard so unit tests (dict input) still pass.
+
+2026-08-04 - app.state injection pattern for tests
+             Reason: app.router.lifespan_context replacement
+             silently fails in this Starlette version.
+             Fix: set app.state.pool directly in fixtures.
+
+2026-08-04 - Soft delete for agent deregistration
+             Reason: Preserves history for debugging.
+             Orchestrator filters by status=active.
+             Re-registration reactivates via ON CONFLICT DO UPDATE.
 
 ## CURRENT BLOCKERS / OPEN QUESTIONS
 - Google Custom Search API key returns 403
@@ -380,6 +543,8 @@ Last completed: Web Search Agent (Week 1)
 - TaskStatus.timestamp uses datetime.now(timezone.utc)
 - AgentCard: name, description, url, version, provider,
   capabilities, skills, authentication
+- AgentProvider: organization (not name), url
+- AgentSkill: Pydantic model — use .id not ["id"]
 
 ### shared/config.py
 - Pydantic v2 SettingsConfigDict (no deprecation warnings)
@@ -396,6 +561,52 @@ Last completed: Web Search Agent (Week 1)
 - Dev: human-readable ConsoleRenderer
 - Prod: JSON output
 - Call setup_logging() once at app startup
+
+### agents/base/a2a_server.py
+- BaseA2AAgent: abstract base for all agents
+- Abstract methods: get_tool_declarations(),
+  execute_tool(), get_system_prompt()
+- Class variable: agent_card (AgentCard instance)
+- Gemini tool loop: run_agent_with_tools()
+  with fallback synthesis pattern
+- Task store: _task_store dict (in-memory, Week 6 → Redis)
+- Task lifecycle methods: _create_task, _update_task_working,
+  _complete_task, _fail_task, _cancel_task, _get_task
+- JSON-RPC handlers: handle_tasks_send, handle_tasks_get,
+  handle_tasks_cancel (all use model_dump(mode="json"))
+- Registry integration: register_with_registry(),
+  deregister_from_registry(), start_heartbeat_loop()
+- build_app() → FastAPI: creates auth_dependency closure,
+  stores on self, builds all 5 endpoints
+- Auth: auth_dependency instance attribute (not module-level)
+  Tests: app.dependency_overrides[_agent.auth_dependency]
+
+### registry/models.py
+- AgentStatus enum: active, inactive, unknown
+- AgentRegistrationRequest: name, url, version,
+  capabilities, agent_card
+- AgentRecord: full DB row model with from_db_row() classmethod
+  from_db_row() handles asyncpg JSONB string → dict conversion
+- RegistrationResponse, AgentListResponse, HealthResponse
+
+### registry/database.py
+- Raw asyncpg — no SQLAlchemy
+- create_pool(): min_size=2, max_size=10, command_timeout=30
+- init_db(): CREATE TABLE IF NOT EXISTS registered_agents
+  with SERIAL PK, UNIQUE(name), TEXT[], JSONB, TIMESTAMPTZ
+- register_agent(): INSERT ... ON CONFLICT (name) DO UPDATE
+- get_agent(), list_agents(), update_heartbeat()
+- deregister_agent(): soft delete (status=inactive)
+- mark_agent_inactive(): called by health checker
+- get_agent_counts(): total + active counts
+
+### registry/main.py
+- FastAPI app on port 9000
+- health_check_loop(): background task, polls agents every 60s
+  httpx GET to health_check_url, marks failures inactive
+- Lifespan: creates pool, inits DB, starts health checker task
+- All endpoints: no auth (internal network assumption)
+- Endpoints: register, list, get, heartbeat, deregister, health
 
 ### agents/web_search/tools.py
 - from ddgs import DDGS (not duckduckgo_search)
@@ -415,38 +626,79 @@ Last completed: Web Search Agent (Week 1)
 - Resource: resource://web-search/capabilities
 
 ### agents/web_search/main.py
-- FastAPI app with lifespan context manager
-- AGENT_CARD = AgentCard(...) defined at module level
-- HTTPBearer(auto_error=False) for auth
-- run_agent_with_tools(): full Gemini tool loop
-  with all_tool_results tracking and fallback synthesis
-- _task_store: dict[str, Task] — in-memory (Week 6 → Redis)
-- Task lifecycle: received → WORKING → COMPLETED
+- FastAPI app via BaseA2AAgent.build_app()
+- WebSearchAgent(BaseA2AAgent) with agent_card class variable
+- Module level: _agent = WebSearchAgent(); app = _agent.build_app()
+
+### agents/data_analysis/tools.py
+- run_python_code(): sandboxed exec with _blocked_import
+  _SAFE_BUILTINS includes __import__ blocker
+  _SAFE_MODULES pre-loaded: numpy, pandas, math, statistics etc.
+  _run_sync() is sync function (not async) for asyncio.to_thread
+  stdout captured via io.StringIO redirect
+- statistical_analysis(): pure stdlib statistics module
+  handles flat list or list-of-dicts with column param
+  returns count, mean, median, std_dev, percentiles, IQR, skewness
+- create_chart(): matplotlib Agg backend (no display needed)
+  types: bar, line, scatter, histogram, pie
+  returns base64 PNG string (no file I/O)
+  plt.close(fig) after every chart to prevent memory leak
+
+### agents/data_analysis/mcp_server.py
+- MCPServer instance: mcp = MCPServer("data-analysis-agent")
+- Three @mcp.tool() decorators
+- get_gemini_tool_declarations() → list[dict]
+- execute_mcp_tool(name, args) → str
+
+### agents/data_analysis/main.py
+- DataAnalysisAgent(BaseA2AAgent)
+- Uses settings.data_analysis_agent_port (not data_analysis_port)
+- Module level: _agent = DataAnalysisAgent(); app = _agent.build_app()
 
 ### tests/test_web_search_mcp.py
 - 25 tests, all passing
-- TestMCPSchemas (7 tests): schema structure
-- TestToolExecution (7 tests): mocked tool logic
-- TestA2AEndpoints (11 tests): HTTP endpoints
-- client fixture: unauthenticated (for rejection tests)
-- auth_client fixture: uses dependency_overrides
+- TestMCPSchemas (7): schema structure
+- TestToolExecution (7): mocked tool logic
+- TestA2AEndpoints (11): HTTP endpoints
+- auth_client: app.dependency_overrides[verify_bearer_token]
 
-## WEEK 2 PLAN
+### tests/test_data_analysis.py
+- 40 tests, all passing
+- TestMCPSchemas (7), TestToolExecution (14),
+  TestBaseAgent (6), TestA2AEndpoints (13)
+- auth_client: app.dependency_overrides[_agent.auth_dependency]
+- Gemini mock: patch("agents.base.a2a_server.asyncio.to_thread")
+- call_count == 3 for two-round tool test (not 2):
+  call1=Gemini, call2=tool's asyncio.to_thread, call3=Gemini
+
+### tests/test_registry.py
+- 33 tests (29 unit + 4 integration)
+- TestRegistryModels (6): Pydantic validation, no DB
+- TestDatabaseLayer (10): real PostgreSQL, test- prefix cleanup
+- TestRegistryEndpoints (13): app.state.pool = MagicMock()
+- TestIntegration (4): @pytest.mark.integration, real DB
+  live_client fixture: create_pool() + init_db() + app.state.pool
+
+## WEEK 3 PLAN
 Build in this order:
-1. agents/base/a2a_server.py
-   Reusable base class so Data Analysis, Document,
-   Code agents don't repeat Web Search boilerplate.
-   Extract: auth, task store, lifespan, common endpoints.
 
-2. agents/data_analysis/
-   Tools: run_python_code, create_chart, statistical_analysis
-   Uses: pandas, matplotlib, numpy
+1. agents/document/
+   Tools: extract_text (PDF/DOCX/URL), summarize_document,
+          extract_entities (names, dates, organizations)
+   Uses: pypdf, python-docx, httpx, BeautifulSoup
 
-3. registry/
-   Agent Registry service (FastAPI + PostgreSQL)
-   Agents register on startup, orchestrator queries it.
+2. agents/code/
+   Tools: analyze_code (AST + complexity), execute_code
+          (sandboxed subprocess), explain_code
+   Uses: ast (stdlib), radon, subprocess
 
-4. Connect Web Search Agent to registry on startup.
+3. tests/test_document.py — same pattern as test_data_analysis.py
+4. tests/test_code.py     — same pattern
+
+Both agents inherit BaseA2AAgent.
+Registry auto-registration is free from base class.
+Week 3 faster than Week 2 — base class handles everything
+except tools + system prompt.
 
 ## SESSION NOTES
 
@@ -454,13 +706,12 @@ Build in this order:
 Built: Complete project scaffold, all shared modules,
        Web Search Agent (tools + MCP + A2A), 25 tests.
 
-Issues resolved this session:
+Issues resolved:
 - setuptools flat-layout error → [tool.setuptools.packages.find]
 - google-generativeai deprecated → google-genai 2.x
 - mcp.server.fastmcp missing → mcp.server.mcpserver.MCPServer
 - Pydantic v2 Field(env=) warnings → SettingsConfigDict
 - gemini-1.5-flash 404 → gemini-flash-lite-latest
-- gemini-2.5-flash not available → gemini-flash-lite-latest
 - duckduckgo-search renamed → ddgs
 - DDG rate limit → fallback synthesis pattern
 - Auth 403 vs 401 → HTTPBearer(auto_error=False)
@@ -470,5 +721,28 @@ Issues resolved this session:
 
 Status: 25/25 tests passing, live API confirmed working.
 
-### Session 2 — Week 2 (next session)
-Starting with: Base agent class (agents/base/a2a_server.py)
+### Session 2 — Week 2 (2026-08-04 to 2026-08-05)
+Built: BaseA2AAgent, Data Analysis Agent, Agent Registry,
+       registry auto-registration in base class.
+
+Issues resolved:
+- settings.data_analysis_port → settings.data_analysis_agent_port
+- AgentCard provider {"name"} → {"organization"}
+- asyncio.to_thread(_async_fn) → asyncio.to_thread(_sync_fn)
+- __builtins__ dict alone doesn't block imports →
+  add __import__: _blocked_import to _SAFE_BUILTINS
+- AgentSkill["id"] → AgentSkill.id (Pydantic model not dict)
+- model_dump() datetime not serializable →
+  model_dump(mode="json") everywhere JSONResponse is used
+- asyncpg JSONB returns str not dict → json.loads() in from_db_row
+- app.router.lifespan_context replacement silently fails →
+  app.state.pool = pool directly in test fixtures
+- call_count == 2 wrong → call_count == 3 (tool also uses to_thread)
+
+Status: 98/98 tests passing.
+  25 test_web_search_mcp.py
+  40 test_data_analysis.py
+  33 test_registry.py
+
+### Session 3 — Week 3 (next session)
+Starting with: Document Agent (agents/document/)

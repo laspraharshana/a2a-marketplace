@@ -104,5 +104,8 @@ python_version = "3.12"
 strict = true
 
 [tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that require live services (PostgreSQL, etc.)",
+]
 asyncio_mode = "auto"
 testpaths = ["tests"]

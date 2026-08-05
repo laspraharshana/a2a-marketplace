@@ -21,11 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+import httpx
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
+
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -462,6 +464,91 @@ class BaseA2AAgent(ABC):
             result=self._task_store[task_id].model_dump(mode="json"),
         ).model_dump(mode="json")
 
+
+    # ── Registry integration ──────────────────────────────────────────────────────
+
+    async def register_with_registry(self) -> None:
+        """
+        Register this agent with the registry on startup.
+
+        Fire-and-forget with error suppression — agent starts fine
+        even if registry is not yet available.
+        Registry URL built from settings.registry_port.
+        """
+        registry_url = f"http://localhost:{settings.registry_port}"
+
+        # Build capabilities list from skill tags
+        capabilities: list[str] = []
+        for skill in self.agent_card.skills:
+            capabilities.extend(skill.tags)
+
+        payload = {
+            "name": self.agent_card.name,
+            "url": self.agent_card.url,
+            "version": self.agent_card.version,
+            "capabilities": list(set(capabilities)),  # deduplicate
+            "agent_card": self.agent_card.model_dump(mode="json"),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(
+                    f"{registry_url}/agents/register",
+                    json=payload,
+                )
+                if response.status_code == 200:
+                    self._log.info(
+                        "registered_with_registry",
+                        registry=registry_url,
+                    )
+                else:
+                    self._log.warning(
+                        "registry_registration_failed",
+                        status=response.status_code,
+                        body=response.text[:200],
+                    )
+        except (httpx.ConnectError, httpx.TimeoutException):
+            self._log.warning(
+                "registry_unavailable",
+                registry=registry_url,
+                note="Agent will run without registry",
+            )
+
+    async def deregister_from_registry(self) -> None:
+        """Called on shutdown to mark agent inactive in registry."""
+        registry_url = f"http://localhost:{settings.registry_port}"
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.delete(
+                    f"{registry_url}/agents/{self.agent_card.name}"
+                )
+                self._log.info("deregistered_from_registry")
+        except Exception:
+            self._log.warning("deregister_failed", note="Registry may be down")
+
+    async def start_heartbeat_loop(self) -> asyncio.Task:
+        """
+        Start background heartbeat task.
+        Returns the task so lifespan can cancel it on shutdown.
+        """
+        async def _heartbeat() -> None:
+            registry_url = f"http://localhost:{settings.registry_port}"
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        await client.put(
+                            f"{registry_url}/agents/"
+                            f"{self.agent_card.name}/heartbeat",
+                            json={"status": "active"},
+                        )
+                        self._log.debug("heartbeat_sent")
+                except Exception:
+                    self._log.debug("heartbeat_failed", note="Registry may be down")
+
+        return asyncio.create_task(_heartbeat())
+    
     # ── FastAPI app factory ───────────────────────────────────────────
 
     def build_app(self) -> FastAPI:
@@ -479,9 +566,30 @@ class BaseA2AAgent(ABC):
 
         @asynccontextmanager
         async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+            
             setup_logging()
-            agent._log.info("agent_starting", name=agent.agent_card.name)
+            agent._log.info(
+                "agent_starting",
+                name=agent.agent_card.name,
+                version=agent.agent_card.version,
+            )
+
+            # Register with registry (non-fatal if registry is down)
+            await agent.register_with_registry()
+
+            # Start heartbeat
+            heartbeat_task = await agent.start_heartbeat_loop()
+
             yield
+
+            # Shutdown
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+            await agent.deregister_from_registry()
             agent._log.info("agent_stopping", name=agent.agent_card.name)
 
         app = FastAPI(

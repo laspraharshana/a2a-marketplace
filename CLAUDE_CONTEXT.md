@@ -5,7 +5,7 @@
 - Repo: https://github.com/YOURUSERNAME/a2a-marketplace
 - Goal: Portfolio project demonstrating A2A + MCP protocols
 - Target: Flat Rock job application / ML Engineer interviews
-- Deadline: August 15, 2025
+- Deadline: August 15, 2026
 
 ## MY PROFILE (for Claude to calibrate explanations)
 - Level: Advanced Python (async, decorators, class design)
@@ -350,14 +350,86 @@ markers = [
 ]
 ```
 
+### TaskState enum — UPPERCASE members (CRITICAL):
+```python
+# shared/a2a_types.py defines TaskState as UPPERCASE:
+TaskState.SUBMITTED       # "submitted"
+TaskState.WORKING         # "working"
+TaskState.INPUT_REQUIRED  # "input-required"
+TaskState.COMPLETED       # "completed"
+TaskState.FAILED          # "failed"
+TaskState.CANCELED        # "canceled"
+
+# WRONG (lowercase — AttributeError at collection time):
+TaskState.completed
+TaskState.working
+
+# Wire values (JSON) are lowercase — the .value is lowercase string.
+# task.status.state.value == "completed"  ← string comparison
+# task.status.state == TaskState.COMPLETED  ← enum comparison
+```
+
+### TaskStatus.message is Message | None, NOT str:
+```python
+# WRONG — message is a Message object, not a plain string:
+TaskStatus(state=TaskState.WORKING, message="Fetching agents...")
+
+# CORRECT — omit message or pass a Message object:
+TaskStatus(state=TaskState.WORKING)
+# or:
+TaskStatus(
+    state=TaskState.WORKING,
+    message=Message(role="agent", parts=[TextPart(text="Fetching agents...")])
+)
+```
+
+### Mock patch paths — use where name is USED not DEFINED:
+```python
+# WRONG — patches the definition module, not the consumer's binding:
+patch("agents.document.tools.extract_text", ...)
+
+# CORRECT — patches the name as imported into mcp_server's namespace:
+patch("agents.document.mcp_server.extract_text", ...)
+
+# Rule: if mcp_server.py does `from agents.document.tools import extract_text`
+# then the live reference is agents.document.mcp_server.extract_text
+# Patching the source module has NO effect on already-imported names.
+```
+
+### Patching static methods when the class is also patched:
+```python
+# WRONG — static method called on MockClass returns another MagicMock:
+with patch("module.MyClass") as MockClass:
+    MockClass.return_value = instance  # instance.method works
+    # BUT MyClass.static_method() → unconfigured MagicMock
+
+# CORRECT — patch the static method explicitly as a second target:
+with patch("module.MyClass") as MockClass, \
+     patch("module.MyClass.static_method", return_value="expected"):
+    MockClient.return_value = instance
+    # Now MyClass.static_method() → "expected"
+
+# Real case: OrchestratorA2AClient.extract_text_result is a @staticmethod
+# called on the CLASS inside execute_node — must patch it separately.
+```
+
+### Orchestrator auth — uses verify_token, not _agent.auth_dependency:
+```python
+# Orchestrator main.py defines verify_token as a module-level function
+# (not instance-bound like BaseA2AAgent agents).
+# Tests use settings.a2a_bearer_token directly in headers:
+headers={"Authorization": f"Bearer {settings.a2a_bearer_token}"}
+# NOT dependency_overrides — just send the real token.
+```
+
 ## ARCHITECTURE OVERVIEW
 Services and their ports:
 - Agent Registry:        localhost:9000  ✅ COMPLETE
-- Orchestrator Agent:    localhost:8000
+- Orchestrator Agent:    localhost:8000  ✅ COMPLETE
 - Web Search Agent:      localhost:8001  ✅ COMPLETE
 - Data Analysis Agent:   localhost:8002  ✅ COMPLETE
-- Document Agent:        localhost:8003
-- Code Agent:            localhost:8004
+- Document Agent:        localhost:8003  ✅ COMPLETE
+- Code Agent:            localhost:8004  ✅ COMPLETE
 - PostgreSQL:            localhost:5432  ✅ INSTALLED (local WSL2)
 - Redis:                 localhost:6379
 
@@ -369,22 +441,24 @@ PostgreSQL credentials:
   Start: sudo service postgresql start
 
 ## CURRENT BUILD PHASE
-Phase: Week 3
-Currently building: Document Agent → Code Agent
-Last completed: Week 2 — all components done
+Phase: Week 4 — Docker + E2E 
+Last completed: Week 3 — all agents + orchestrator done
 
-Week 2 completed:
-- BaseA2AAgent (agents/base/a2a_server.py)
-- Data Analysis Agent (agents/data_analysis/) — 40/40 tests
-- Agent Registry (registry/) — 33/33 tests
-  - 29 unit/DB tests
-  - 4 integration tests (@pytest.mark.integration)
-- Registry auto-registration wired into BaseA2AAgent
+Week 3 completed:
+- Document Agent (agents/document/) — 41/41 tests
+- Code Agent (agents/code/) — 41/41 tests
+- Orchestrator (orchestrator/) — 32/32 unit tests
+  - a2a_client.py: HTTP A2A transport layer
+  - task_decomposer.py: LangGraph plan→execute→synthesize graph
+  - main.py: FastAPI on port 8000, /orchestrate convenience endpoint
 
-Running test total: 98 tests, all passing
+Running test total: 212 tests, all passing
   25  tests/test_web_search_mcp.py
   40  tests/test_data_analysis.py
   33  tests/test_registry.py
+  41  tests/test_document.py
+  41  tests/test_code.py
+  32  tests/test_orchestrator.py  (unit only, 7 integration deselected)
 
 ## COMPLETED COMPONENTS
 
@@ -406,61 +480,62 @@ Running test total: 98 tests, all passing
 - [x] agents/base/a2a_server.py
 - [N/A] agents/base/agent_card.py — eliminated (YAGNI)
         AgentCard lives in shared/a2a_types.py
-        Instances defined in each agent's main.py
 
 ### Web Search Agent ✅ COMPLETE
 - [x] agents/web_search/tools.py
 - [x] agents/web_search/mcp_server.py
 - [x] agents/web_search/main.py
 - [x] tests/test_web_search_mcp.py (25/25 passing)
-- [ ] agents/web_search/Dockerfile  ← Week 6
+- [ ] agents/web_search/Dockerfile  ← Week 4
 
 ### Data Analysis Agent ✅ COMPLETE
 - [x] agents/data_analysis/tools.py
 - [x] agents/data_analysis/mcp_server.py
 - [x] agents/data_analysis/main.py
 - [x] tests/test_data_analysis.py (40/40 passing)
-- [ ] agents/data_analysis/Dockerfile  ← Week 6
+- [ ] agents/data_analysis/Dockerfile  ← Week 4
 
-### Document Agent
-- [ ] agents/document/tools.py
-- [ ] agents/document/mcp_server.py
-- [ ] agents/document/main.py
-- [ ] agents/document/Dockerfile  ← Week 6
+### Document Agent ✅ COMPLETE
+- [x] agents/document/tools.py
+- [x] agents/document/mcp_server.py
+- [x] agents/document/main.py
+- [x] tests/test_document.py (41/41 passing)
+- [ ] agents/document/Dockerfile  ← Week 4
 
-### Code Agent
-- [ ] agents/code/tools.py
-- [ ] agents/code/mcp_server.py
-- [ ] agents/code/main.py
-- [ ] agents/code/Dockerfile  ← Week 6
+### Code Agent ✅ COMPLETE
+- [x] agents/code/tools.py
+- [x] agents/code/mcp_server.py
+- [x] agents/code/main.py
+- [x] tests/test_code.py (41/41 passing)
+- [ ] agents/code/Dockerfile  ← Week 4
 
-### Orchestrator
-- [ ] orchestrator/a2a_client.py
-- [ ] orchestrator/task_decomposer.py
-- [ ] orchestrator/agent.py
-- [ ] orchestrator/main.py
-- [ ] orchestrator/Dockerfile  ← Week 6
+### Orchestrator ✅ COMPLETE
+- [x] orchestrator/a2a_client.py
+- [x] orchestrator/task_decomposer.py
+- [x] orchestrator/main.py
+- [x] tests/test_orchestrator.py (32/32 unit passing, 7 integration pending)
+- [ ] orchestrator/Dockerfile  ← Week 4
 
 ### Infrastructure Files
-- [ ] docker-compose.yml  ← Week 6
-- [ ] docker-compose.dev.yml  ← Week 6
-- [ ] alembic migrations  ← Week 6
+- [ ] docker-compose.yml  ← Week 4
+- [ ] docker-compose.dev.yml  ← Week 4
+- [ ] alembic migrations  ← Week 4 (optional, low priority)
 
 ### Observability
-- [ ] shared/telemetry.py
+- [ ] shared/telemetry.py  ← Week 4 (low priority)
 - [ ] OpenTelemetry integration in all services
 
 ### Tests
 - [x] tests/test_web_search_mcp.py (25 tests)
 - [x] tests/test_data_analysis.py (40 tests)
 - [x] tests/test_registry.py (33 tests)
-- [ ] tests/test_document.py
-- [ ] tests/test_code.py
-- [ ] tests/test_orchestrator.py
-- [ ] tests/test_e2e.py
+- [x] tests/test_document.py (41 tests)
+- [x] tests/test_code.py (41 tests)
+- [x] tests/test_orchestrator.py (32 unit + 7 integration)
+- [ ] tests/test_e2e.py  ← Week 4
 
 ### Polish
-- [ ] README.md (portfolio quality)
+- [x] README.md (portfolio quality)  
 - [ ] docs/demo_scenarios.md
 - [ ] Demo video
 
@@ -524,27 +599,58 @@ Running test total: 98 tests, all passing
              Orchestrator filters by status=active.
              Re-registration reactivates via ON CONFLICT DO UPDATE.
 
+2026-08-05 - Code Agent uses subprocess not exec()
+             Reason: Code Agent's purpose is running arbitrary
+             user code. exec() with blocked imports defeats that.
+             subprocess.run() gives process isolation, hard timeout,
+             memory cap via resource.setrlimit (Linux/WSL2).
+
+2026-08-05 - Document summarize_document calls Gemini directly
+             Reason: Summarization IS the LLM task, not a step
+             toward another response. Nested LLM call is intentional.
+             Same pattern as explain_code in Code Agent.
+
+2026-08-05 - Orchestrator uses LangGraph for state machine
+             Reason: Need to coordinate multiple agents across time,
+             tracking what's been done and what's left.
+             LangGraph: plan→execute→synthesize loop with MAX_ITERATIONS=5.
+             Agents themselves are stateless — only orchestrator has graph.
+
+2026-08-05 - Orchestrator TaskStatus.message left as None
+             Reason: TaskStatus.message is Message | None (not str).
+             Setting it requires constructing a full Message object.
+             For orchestrator simplicity, omit message field entirely.
+
+2026-08-05 - OrchestratorA2AClient.extract_text_result is @staticmethod
+             Reason: Called on the class directly in execute_node.
+             In tests, must patch it separately when MockClient patches
+             the class — MockClass.extract_text_result returns MagicMock
+             unless explicitly configured.
+
 ## CURRENT BLOCKERS / OPEN QUESTIONS
-- Google Custom Search API key returns 403
+- Google Custom Search API key returns 403 : RESOLVED ✅ 
   (Search key and Gemini key were mixed up)
   Currently using ddgs fallback only — works fine
-  for development. Fix CSE key in Week 6 polish.
+  for development. Fix CSE key in Week 4 polish.
+- Integration tests (7 in test_orchestrator.py) require all
+  services running simultaneously — deferred to Week 4 E2E session.
 
 ## FILES CLAUDE SHOULD KNOW ABOUT
 
 ### shared/a2a_types.py
 - Full A2A protocol type system (Pydantic models)
-- Key types: Task, AgentCard, Message, Artifact
+- TaskState: UPPERCASE members (SUBMITTED, WORKING, INPUT_REQUIRED,
+             COMPLETED, FAILED, CANCELED) — values are lowercase strings
+- TaskStatus.message: Message | None — NOT a plain string
+- TaskStatus.timestamp: datetime.now(timezone.utc)
 - Part types: TextPart, DataPart, FilePart (Union = Part)
-- Enums: TaskState (submitted/working/input-required/
-         completed/failed/canceled)
 - JSON-RPC: JSONRPCRequest, JSONRPCResponse, JSONRPCError
 - A2AErrorCode: TASK_NOT_FOUND=-32001, INTERNAL_ERROR=-32603
-- TaskStatus.timestamp uses datetime.now(timezone.utc)
 - AgentCard: name, description, url, version, provider,
   capabilities, skills, authentication
 - AgentProvider: organization (not name), url
 - AgentSkill: Pydantic model — use .id not ["id"]
+- Artifact: artifactId (auto UUID), name, parts, metadata
 
 ### shared/config.py
 - Pydantic v2 SettingsConfigDict (no deprecation warnings)
@@ -569,7 +675,7 @@ Running test total: 98 tests, all passing
 - Class variable: agent_card (AgentCard instance)
 - Gemini tool loop: run_agent_with_tools()
   with fallback synthesis pattern
-- Task store: _task_store dict (in-memory, Week 6 → Redis)
+- Task store: _task_store dict (in-memory, Week 4 → Redis)
 - Task lifecycle methods: _create_task, _update_task_working,
   _complete_task, _fail_task, _cancel_task, _get_task
 - JSON-RPC handlers: handle_tasks_send, handle_tasks_get,
@@ -655,11 +761,102 @@ Running test total: 98 tests, all passing
 - Uses settings.data_analysis_agent_port (not data_analysis_port)
 - Module level: _agent = DataAnalysisAgent(); app = _agent.build_app()
 
+### agents/document/tools.py
+- extract_text(): PDF/DOCX/TXT/URL → ExtractionResult
+  pypdf for PDF (io.BytesIO, thread pool)
+  python-docx for DOCX (io.BytesIO, thread pool)
+  httpx async for URLs, BeautifulSoup HTML cleaning
+  Auto-detects type from extension or URL scheme
+- summarize_document(): calls Gemini directly (nested LLM call)
+  4 styles: concise, detailed, bullet, executive
+  Parses KEY_POINTS_JSON marker from response
+  Truncates to 12k chars before sending to Gemini
+- extract_entities(): regex heuristics (no spaCy/NER)
+  Types: emails, urls, dates, numbers, names, organizations
+
+### agents/document/mcp_server.py
+- MCPServer instance: mcp = MCPServer("document-agent")
+- extract_text_tool: caps text at 8000 chars in response,
+  sets text_truncated=True if full_text_length > 8000
+- summarize_document_tool, extract_entities_tool
+- Patch target for tests: agents.document.mcp_server.<fn>
+  NOT agents.document.tools.<fn>
+
+### agents/document/main.py
+- DocumentAgent(BaseA2AAgent), port 8003
+- 3 skills: extract-text, summarize, extract-entities
+
+### agents/code/tools.py
+- analyze_code(): ast.parse() + radon cc_visit()
+  Returns function/class/import counts, complexity per function
+  _complexity_grade(): A(1-5) B(6-10) C(11-15) D(16-20) E(21-25) F(26+)
+  Degrades gracefully if radon not installed
+- execute_code(): subprocess.run() with sys.executable
+  Hard timeout via subprocess timeout= param
+  Memory cap via resource.setrlimit RLIMIT_AS (Linux/WSL2)
+  preexec_fn=_set_memory_limit passed to subprocess.run
+  NOT exec() — purpose is running arbitrary code
+- explain_code(): Gemini direct call, 3 detail levels
+  Parses COMPLEXITY_SUMMARY and SUGGESTIONS_JSON markers
+
+### agents/code/mcp_server.py
+- MCPServer instance: mcp = MCPServer("code-agent")
+- analyze_code_tool, execute_code_tool, explain_code_tool
+- Patch target for tests: agents.code.mcp_server.<fn>
+
+### agents/code/main.py
+- CodeAgent(BaseA2AAgent), port 8004
+- 3 skills: analyze-code, execute-code, explain-code
+
+### orchestrator/a2a_client.py
+- OrchestratorA2AClient: async context manager
+- send_task(): sends tasks/send, polls until terminal state
+  Terminal states: COMPLETED, FAILED, CANCELED
+  Non-terminal: SUBMITTED, WORKING, INPUT_REQUIRED
+  INPUT_REQUIRED → cancel + raise A2AClientError
+- get_task(), cancel_task(), check_health()
+- extract_text_result(): @staticmethod, extracts text from Task
+  Called as OrchestratorA2AClient.extract_text_result(task)
+  Must patch separately when MockClient patches the class
+- _TERMINAL_STATES = {TaskState.COMPLETED, TaskState.FAILED,
+                      TaskState.CANCELED}
+- Exceptions: A2AClientError (network/protocol),
+              A2ATaskError (task failed/canceled, has .task attribute)
+
+### orchestrator/task_decomposer.py
+- LangGraph StateGraph with 3 nodes: plan, execute, synthesize
+- OrchestratorState TypedDict: user_query, available_agents,
+  plan, completed_calls, final_answer, iteration, error
+- AgentCallSpec TypedDict: agent_name, agent_url, message, reason
+- AgentCallResult TypedDict: agent_name, agent_url, message,
+  result, success, error
+- MAX_ITERATIONS = 5 (safety limit on plan→execute loop)
+- plan_node: calls _call_gemini_plan → returns AgentCallSpec list
+  Empty list = "DONE" = route to synthesize
+- execute_node: asyncio.gather() all specs concurrently
+  Accumulates results across iterations (does not replace)
+  Failures recorded as AgentCallResult(success=False) — not raised
+- synthesize_node: calls _call_gemini_synthesize → final answer
+- orchestrator_graph: module-level compiled graph (built once)
+- run_orchestrator(query, available_agents) → (answer, calls)
+
+### orchestrator/main.py
+- FastAPI on port 8000
+- verify_token(): module-level function (not instance-bound)
+  Tests send real token in headers — no dependency_overrides
+- fetch_available_agents(): httpx GET to registry /agents
+  Returns [] on any error (orchestrator degrades gracefully)
+- handle_orchestrate(query, task_id): core pipeline
+  Sets TaskStatus(state=TaskState.WORKING) — no message field
+  Calls run_orchestrator() → builds Task(state=TaskState.COMPLETED)
+- Extra endpoints: GET /agents, POST /orchestrate
+  /orchestrate: {"query": "..."} → {"answer", "task_id",
+                "state", "agents_called", "calls_made"}
+- Standard A2A: tasks/send, tasks/get, tasks/cancel
+
 ### tests/test_web_search_mcp.py
 - 25 tests, all passing
-- TestMCPSchemas (7): schema structure
-- TestToolExecution (7): mocked tool logic
-- TestA2AEndpoints (11): HTTP endpoints
+- TestMCPSchemas (7), TestToolExecution (7), TestA2AEndpoints (11)
 - auth_client: app.dependency_overrides[verify_bearer_token]
 
 ### tests/test_data_analysis.py
@@ -673,32 +870,86 @@ Running test total: 98 tests, all passing
 
 ### tests/test_registry.py
 - 33 tests (29 unit + 4 integration)
-- TestRegistryModels (6): Pydantic validation, no DB
-- TestDatabaseLayer (10): real PostgreSQL, test- prefix cleanup
-- TestRegistryEndpoints (13): app.state.pool = MagicMock()
-- TestIntegration (4): @pytest.mark.integration, real DB
-  live_client fixture: create_pool() + init_db() + app.state.pool
+- TestRegistryModels (6), TestDatabaseLayer (10),
+  TestRegistryEndpoints (13), TestIntegration (4)
+- app.state.pool = MagicMock() for unit tests
+- live_client fixture for integration: create_pool() + init_db()
 
-## WEEK 3 PLAN
-Build in this order:
+### tests/test_document.py
+- 41 tests, all passing
+- TestMCPSchemas (7), TestToolExecution (14),
+  TestBaseAgent (6), TestA2AEndpoints (13)
+- Patch target: agents.document.mcp_server.extract_text
+  NOT agents.document.tools.extract_text
 
-1. agents/document/
-   Tools: extract_text (PDF/DOCX/URL), summarize_document,
-          extract_entities (names, dates, organizations)
-   Uses: pypdf, python-docx, httpx, BeautifulSoup
+### tests/test_code.py
+- 41 tests, all passing
+- TestMCPSchemas (7), TestToolExecution (14),
+  TestBaseAgent (6), TestA2AEndpoints (13)
+- test_execute_code_real_subprocess: real subprocess, no mock
+- Patch target: agents.code.mcp_server.<fn>
 
-2. agents/code/
-   Tools: analyze_code (AST + complexity), execute_code
-          (sandboxed subprocess), explain_code
-   Uses: ast (stdlib), radon, subprocess
+### tests/test_orchestrator.py
+- 39 total (32 unit selected, 7 integration deselected)
+- TestA2AClient (11): mock httpx.AsyncClient.post/get
+- TestTaskDecomposer (8): mock _call_gemini_plan/synthesize
+- TestOrchestratorApp (13): mock fetch_available_agents +
+  run_orchestrator, send real bearer token in headers
+- TestIntegration (7): @pytest.mark.integration, live services
+- extract_text_result patching:
+  patch("orchestrator.task_decomposer.OrchestratorA2AClient")
+  + patch("orchestrator.task_decomposer.OrchestratorA2AClient
+          .extract_text_result", return_value="text")
 
-3. tests/test_document.py — same pattern as test_data_analysis.py
-4. tests/test_code.py     — same pattern
+## WEEK 4 PLAN
+Build in this order (priority order):
 
-Both agents inherit BaseA2AAgent.
-Registry auto-registration is free from base class.
-Week 3 faster than Week 2 — base class handles everything
-except tools + system prompt.
+1. docker-compose.yml — all 6 services + postgres + redis.
+   Each agent gets its own container.
+   Shared network: a2a-network.
+   Healthchecks on all services.
+
+2. Dockerfiles — one per service (6 total + registry).
+   Base: python:3.12-slim
+   Non-root user, .venv copied in, uvicorn CMD.
+
+3. tests/test_e2e.py — full flow with all services running.
+   @pytest.mark.integration, requires docker-compose up.
+   Prerequisites: sudo service postgresql start,
+                  docker compose up
+   3-4 scenarios:
+   - search + summarize compound query
+   - code analyze + execute pipeline
+   - document extract + data analysis
+   - multi-agent orchestrated query
+   Run with: pytest tests/test_e2e.py -m integration -v
+  
+
+4. shared/telemetry.py — OpenTelemetry basic setup.
+   trace_id propagation in A2A headers.
+   Low priority — add after Docker works.
+
+5. docs/demo_scenarios.md — scripted interview demo.
+   Step-by-step commands that show the system working.
+   Screenshots or expected outputs included.
+
+### Docker + WSL2 service startup order:
+```bash
+# ALWAYS start in this order:
+sudo service postgresql start   # DB first
+redis-server --daemonize yes    # Cache second  
+python -m registry.main &       # Registry third
+# Then agents (any order)
+python -m agents.web_search.main &
+python -m agents.data_analysis.main &
+python -m agents.document.main &
+python -m agents.code.main &
+# Orchestrator last (needs registry)
+python -m orchestrator.main &
+
+# In Docker Compose: use depends_on + healthcheck
+# to enforce this order automatically.
+```
 
 ## SESSION NOTES
 
@@ -740,9 +991,27 @@ Issues resolved:
 - call_count == 2 wrong → call_count == 3 (tool also uses to_thread)
 
 Status: 98/98 tests passing.
-  25 test_web_search_mcp.py
-  40 test_data_analysis.py
-  33 test_registry.py
 
-### Session 3 — Week 3 (next session)
-Starting with: Document Agent (agents/document/)
+### Session 3 — Week 3 (2026-08-05 to 2026-08-06)
+Built: Document Agent, Code Agent, Orchestrator.
+
+Issues resolved:
+- patch("agents.document.tools.extract_text") has no effect →
+  must patch agents.document.mcp_server.extract_text
+  (patch where name is USED not DEFINED)
+- TaskState.completed AttributeError at collection time →
+  TaskState uses UPPERCASE: TaskState.COMPLETED
+- TaskStatus(message="string") Pydantic error →
+  message field is Message | None, not str
+  Fix: omit message field in orchestrator
+- OrchestratorA2AClient.extract_text_result (staticmethod)
+  returns MagicMock when class is patched →
+  must patch staticmethod separately as second patch target
+
+Status: 212/212 tests passing (32 orchestrator unit tests).
+  25  test_web_search_mcp.py
+  40  test_data_analysis.py
+  33  test_registry.py
+  41  test_document.py
+  41  test_code.py
+  32  test_orchestrator.py (unit only)

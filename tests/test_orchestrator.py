@@ -483,7 +483,7 @@ class TestOrchestratorApp:
         ) as client:
             response = await client.get("/.well-known/agent.json")
         assert response.status_code == 200
-        assert response.json()["name"] == "Orchestrator Agent"
+        assert response.json()["name"] == "orchestrator"
 
     @pytest.mark.asyncio
     async def test_health_public(self):

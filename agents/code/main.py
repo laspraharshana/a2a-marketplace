@@ -28,7 +28,7 @@ class CodeAgent(BaseA2AAgent):
     """
 
     agent_card = AgentCard(
-        name="Code Agent",
+        name="code-agent",
         description=(
             "Analyzes Python code structure and complexity using AST and radon, "
             "executes code safely in an isolated subprocess with timeout and memory "

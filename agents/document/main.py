@@ -40,7 +40,7 @@ class DocumentAgent(BaseA2AAgent):
     """
 
     agent_card = AgentCard(
-        name="Document Agent",
+        name="document-agent",
         description=(
             "Processes documents from PDF files, DOCX files, and web URLs. "
             "Extracts text content, generates summaries in multiple styles, "

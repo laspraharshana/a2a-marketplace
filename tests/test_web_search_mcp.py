@@ -270,7 +270,7 @@ class TestA2AEndpoints:
     async def test_agent_card_required_fields(self, client):
         response = await client.get("/.well-known/agent.json")
         data = response.json()
-        assert data["name"] == "WebSearchAgent"
+        assert data["name"] == "web-search-agent"
         assert "description" in data
         assert "url" in data
         assert "skills" in data

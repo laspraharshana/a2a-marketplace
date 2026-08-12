@@ -397,7 +397,7 @@ class TestBaseAgent:
         assert _agent.agent_card is not None
 
     def test_agent_card_name(self):
-        assert _agent.agent_card.name == "Code Agent"
+        assert _agent.agent_card.name == "code-agent"
 
     def test_agent_card_skills_count(self):
         assert len(_agent.agent_card.skills) == 3
@@ -430,7 +430,7 @@ class TestA2AEndpoints:
         ) as client:
             response = await client.get("/.well-known/agent.json")
         assert response.status_code == 200
-        assert response.json()["name"] == "Code Agent"
+        assert response.json()["name"] == "code-agent"
 
     @pytest.mark.asyncio
     async def test_health_public(self):

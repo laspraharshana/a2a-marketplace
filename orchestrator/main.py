@@ -99,7 +99,7 @@ async def fetch_available_agents() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 AGENT_CARD = AgentCard(
-    name="Orchestrator Agent",
+    name="orchestrator",
     description=(
         "Multi-agent orchestrator that routes tasks to specialized agents "
         "(Web Search, Data Analysis, Document Processing, Code Analysis) "

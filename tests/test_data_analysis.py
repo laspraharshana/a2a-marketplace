@@ -328,7 +328,7 @@ class TestBaseAgent:
     def test_agent_card_structure(self):
         from agents.data_analysis.main import DataAnalysisAgent
         card = DataAnalysisAgent.agent_card
-        assert card.name == "Data Analysis Agent"
+        assert card.name == "data-analysis-agent"
         assert card.version == "1.0.0"
         assert len(card.skills) == 3
         skill_ids = [s.id for s in card.skills]
@@ -388,7 +388,7 @@ class TestA2AEndpoints:
         response = await client.get("/.well-known/agent.json")
         assert response.status_code == 200
         card = response.json()
-        assert card["name"] == "Data Analysis Agent"
+        assert card["name"] == "data-analysis-agent"
         assert "skills" in card
         assert len(card["skills"]) == 3
 
@@ -399,7 +399,7 @@ class TestA2AEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["agent"] == "Data Analysis Agent"
+        assert data["agent"] == "data-analysis-agent"
 
     @pytest.mark.asyncio
     async def test_tasks_send_requires_auth(self, client):

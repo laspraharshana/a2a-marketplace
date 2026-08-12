@@ -94,7 +94,7 @@ def verify_bearer_token(
 # ── Agent Card ────────────────────────────────────────────────
 
 AGENT_CARD = AgentCard(
-    name="WebSearchAgent",
+    name="web-search-agent",
     description=(
         "Specialized agent for web research. "
         "Searches the web, fetches news, and reads URLs. "

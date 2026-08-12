@@ -43,7 +43,7 @@ class DataAnalysisAgent(BaseA2AAgent):
     """
 
     agent_card = AgentCard(
-        name="Data Analysis Agent",
+        name="data-analysis-agent",
         description=(
             "Analyzes data using Python, statistics, and visualization. "
             "Capable of executing custom analysis code, computing "

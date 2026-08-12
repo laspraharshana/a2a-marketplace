@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     document_agent_port: int = Field(default=8003)
     code_agent_port: int = Field(default=8004)
 
+    # ── Docker networking ────────────────────────────────────
+    # Empty string = local dev (use localhost URLs)
+    # Set by docker-compose per service (e.g. http://web-search-agent:8001)
+    agent_self_url: str = Field(default="")
+
     # ── Security ─────────────────────────────────────────────
     jwt_secret_key: str = Field(
         default="dev-secret-change-in-production"
@@ -64,6 +69,10 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")
     log_level: str = Field(default="DEBUG")
     agent_name: str = Field(default="unknown-agent")
+
+    # ── Service Discovery ────────────────────────────────────
+    registry_port: int = Field(default=9000)
+    registry_url: str = Field(default="http://localhost:9000")
 
 
 @lru_cache()

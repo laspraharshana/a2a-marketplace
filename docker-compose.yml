@@ -1,0 +1,190 @@
+# docker-compose.yml
+# Production-style compose for A2A Multi-Agent Marketplace
+#
+# Prerequisites (WSL2):
+#   sudo service postgresql start   ← host postgres, not containerized
+#   redis-server --daemonize yes    ← host redis
+#   docker compose up --build
+#
+# Agents connect to host postgres/redis via host.docker.internal.
+# Docker 20.10+ on Linux: host-gateway resolves automatically.
+
+name: a2a-marketplace
+
+# ── Shared configuration ──────────────────────────────────────────────────────
+x-common-env: &common-env
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
+  # ← FIXED: use postgresql:// (asyncpg format, not SQLAlchemy)
+  POSTGRES_URL: postgresql://a2a:a2a_password@host.docker.internal:5432/a2a_marketplace
+  REDIS_URL: redis://host.docker.internal:6379
+  # ← FIXED: added missing security + search keys
+  A2A_BEARER_TOKEN: ${A2A_BEARER_TOKEN}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+  GOOGLE_SEARCH_API_KEY: ${GOOGLE_SEARCH_API_KEY:-}
+  GOOGLE_SEARCH_ENGINE_ID: ${GOOGLE_SEARCH_ENGINE_ID:-}
+  AGENT_MODEL: ${AGENT_MODEL:-gemini-flash-lite-latest}
+  ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-gemini-flash-latest}
+  # Service discovery — containers talk via service names
+  REGISTRY_URL: http://registry:9000
+  WEB_SEARCH_AGENT_URL: http://web-search-agent:8001
+  DATA_ANALYSIS_AGENT_URL: http://data-analysis-agent:8002
+  DOCUMENT_AGENT_URL: http://document-agent:8003
+  CODE_AGENT_URL: http://code-agent:8004
+  ORCHESTRATOR_URL: http://orchestrator:8000
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+x-agent-defaults: &agent-defaults
+  restart: unless-stopped
+  networks:
+    - a2a-network
+  extra_hosts:
+    # WSL2 native Docker: resolve host.docker.internal → host gateway
+    - "host.docker.internal:host-gateway"
+
+# ── Services ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── Agent Registry ──────────────────────────────────────────────────────────
+  registry:
+    <<: *agent-defaults
+    build:
+      context: .
+      dockerfile: registry/Dockerfile
+    container_name: a2a-registry
+    ports:
+      - "9000:9000"
+    environment:
+      <<: *common-env
+      REGISTRY_PORT: 9000
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+
+  # ── Web Search Agent ─────────────────────────────────────────────────────────
+  web-search-agent:
+    <<: *agent-defaults
+    build:
+      context: .
+      dockerfile: agents/web_search/Dockerfile
+    container_name: a2a-web-search-agent
+    ports:
+      - "8001:8001"
+    environment:
+      <<: *common-env
+      AGENT_NAME: web-search-agent
+      WEB_SEARCH_AGENT_PORT: 8001
+      AGENT_SELF_URL: http://web-search-agent:8001
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  # ── Data Analysis Agent ──────────────────────────────────────────────────────
+  data-analysis-agent:
+    <<: *agent-defaults
+    build:
+      context: .
+      dockerfile: agents/data_analysis/Dockerfile
+    container_name: a2a-data-analysis-agent
+    ports:
+      - "8002:8002"
+    environment:
+      <<: *common-env
+      AGENT_NAME: data-analysis-agent
+      DATA_ANALYSIS_AGENT_PORT: 8002
+      AGENT_SELF_URL: http://data-analysis-agent:8002
+      # ← ADDED: explicit Agg backend as env var (belt + suspenders)
+      MPLBACKEND: Agg
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  # ── Document Agent ───────────────────────────────────────────────────────────
+  document-agent:
+    <<: *agent-defaults
+    build:
+      context: .
+      dockerfile: agents/document/Dockerfile
+    container_name: a2a-document-agent
+    ports:
+      - "8003:8003"
+    environment:
+      <<: *common-env
+      AGENT_NAME: document-agent
+      DOCUMENT_AGENT_PORT: 8003
+      AGENT_SELF_URL: http://document-agent:8003
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  # ── Code Agent ───────────────────────────────────────────────────────────────
+  code-agent:
+    <<: *agent-defaults
+    build:
+      context: .
+      dockerfile: agents/code/Dockerfile
+    container_name: a2a-code-agent
+    ports:
+      - "8004:8004"
+    environment:
+      <<: *common-env
+      AGENT_NAME: code-agent
+      CODE_AGENT_PORT: 8004
+      AGENT_SELF_URL: http://code-agent:8004
+      TMPDIR: /tmp
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  # ── Orchestrator ─────────────────────────────────────────────────────────────
+  orchestrator:
+    <<: *agent-defaults
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    container_name: a2a-orchestrator
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      AGENT_NAME: orchestrator
+      ORCHESTRATOR_PORT: 8000
+      AGENT_SELF_URL: http://orchestrator:8000
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    depends_on:
+      registry:
+        condition: service_healthy
+      web-search-agent:
+        condition: service_healthy
+      data-analysis-agent:
+        condition: service_healthy
+      document-agent:
+        condition: service_healthy
+      code-agent:
+        condition: service_healthy
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  a2a-network:
+    driver: bridge
+    name: a2a-network

@@ -1,0 +1,83 @@
+# .dockerignore
+# Reduces build context sent to Docker daemon.
+# Smaller context = faster builds.
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environment ───────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Testing & Coverage ────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ── Type checking & Linting ───────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+
+# ── Environment files (NEVER in Docker build context) ─────────
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+# Keep .env.example (it's safe — no real values)
+!.env.example
+
+# ── Git ───────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── IDE & Editors ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS generated ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
+
+# ── Documentation (not needed in containers) ──────────────────
+README.md
+docs/
+*.md
+!pyproject.toml     # Needed for pip install
+
+# ── Test files (not needed in production containers) ──────────
+tests/
+
+# ── Docker files themselves ───────────────────────────────────
+# (not needed inside containers)
+docker-compose*.yml
+.dockerignore
+Makefile
+
+# ── Generated outputs from agents ─────────────────────────────
+agents/data_analysis/outputs/
+agents/document/uploads/
+agents/code/sandbox/
+
+# ── Distribution & Build ──────────────────────────────────────
+dist/
+build/
+*.egg-info/

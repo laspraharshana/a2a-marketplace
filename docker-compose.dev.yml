@@ -1,0 +1,129 @@
+# docker-compose.dev.yml
+# Development overrides — source-mounted, auto-reload
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Changes vs production:
+#   - uvicorn --reload enabled
+#   - Source dirs mounted as volumes (edit without rebuild)
+#   - LOG_LEVEL=DEBUG
+#   - Shorter healthcheck intervals
+
+name: a2a-marketplace
+
+x-dev-env: &dev-env
+  ENVIRONMENT: development
+  LOG_LEVEL: DEBUG
+
+x-dev-healthcheck: &dev-healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 10
+  start_period: 15s
+
+services:
+
+  registry:
+    environment:
+      <<: *dev-env
+    healthcheck:
+      <<: *dev-healthcheck
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./registry:/app/registry:ro
+    command: >
+      uvicorn registry.main:app
+      --host 0.0.0.0
+      --port 9000
+      --reload
+      --reload-dir /app/shared
+      --reload-dir /app/registry
+
+  web-search-agent:
+    environment:
+      <<: *dev-env
+    healthcheck:
+      <<: *dev-healthcheck
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./agents/__init__.py:/app/agents/__init__.py:ro
+      - ./agents/base:/app/agents/base:ro
+      - ./agents/web_search:/app/agents/web_search:ro
+    command: >
+      uvicorn agents.web_search.main:app
+      --host 0.0.0.0
+      --port 8001
+      --reload
+      --reload-dir /app/shared
+      --reload-dir /app/agents
+
+  data-analysis-agent:
+    environment:
+      <<: *dev-env
+    healthcheck:
+      <<: *dev-healthcheck
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./agents/__init__.py:/app/agents/__init__.py:ro
+      - ./agents/base:/app/agents/base:ro
+      - ./agents/data_analysis:/app/agents/data_analysis:ro
+    command: >
+      uvicorn agents.data_analysis.main:app
+      --host 0.0.0.0
+      --port 8002
+      --reload
+      --reload-dir /app/shared
+      --reload-dir /app/agents
+
+  document-agent:
+    environment:
+      <<: *dev-env
+    healthcheck:
+      <<: *dev-healthcheck
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./agents/__init__.py:/app/agents/__init__.py:ro
+      - ./agents/base:/app/agents/base:ro
+      - ./agents/document:/app/agents/document:ro
+    command: >
+      uvicorn agents.document.main:app
+      --host 0.0.0.0
+      --port 8003
+      --reload
+      --reload-dir /app/shared
+      --reload-dir /app/agents
+
+  code-agent:
+    environment:
+      <<: *dev-env
+    healthcheck:
+      <<: *dev-healthcheck
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./agents/__init__.py:/app/agents/__init__.py:ro
+      - ./agents/base:/app/agents/base:ro
+      - ./agents/code:/app/agents/code:ro
+    command: >
+      uvicorn agents.code.main:app
+      --host 0.0.0.0
+      --port 8004
+      --reload
+      --reload-dir /app/shared
+      --reload-dir /app/agents
+
+  orchestrator:
+    environment:
+      <<: *dev-env
+    healthcheck:
+      <<: *dev-healthcheck
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./agents/__init__.py:/app/agents/__init__.py:ro
+      - ./agents/base:/app/agents/base:ro
+      - ./orchestrator:/app/orchestrator:ro
+    command: >
+      uvicorn orchestrator.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/shared
+      --reload-dir /app/orchestrator

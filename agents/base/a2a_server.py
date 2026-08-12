@@ -314,7 +314,10 @@ class BaseA2AAgent(ABC):
             task.status = TaskStatus(
                 state=TaskState.FAILED,
                 timestamp=datetime.now(timezone.utc),
-                message=error_msg,
+                message=Message(
+                    role="agent",
+                    parts=[TextPart(type="text", text=error_msg)],  
+                ),
             )
 
     def _cancel_task(self, task_id: str) -> bool:
@@ -475,7 +478,7 @@ class BaseA2AAgent(ABC):
         even if registry is not yet available.
         Registry URL built from settings.registry_port.
         """
-        registry_url = f"http://localhost:{settings.registry_port}"
+        registry_url = settings.registry_url
 
         # Build capabilities list from skill tags
         capabilities: list[str] = []
@@ -516,7 +519,7 @@ class BaseA2AAgent(ABC):
 
     async def deregister_from_registry(self) -> None:
         """Called on shutdown to mark agent inactive in registry."""
-        registry_url = f"http://localhost:{settings.registry_port}"
+        registry_url = settings.registry_url
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -533,7 +536,7 @@ class BaseA2AAgent(ABC):
         Returns the task so lifespan can cancel it on shutdown.
         """
         async def _heartbeat() -> None:
-            registry_url = f"http://localhost:{settings.registry_port}"
+            registry_url = settings.registry_url
             while True:
                 await asyncio.sleep(30)
                 try:

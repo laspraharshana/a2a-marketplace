@@ -485,12 +485,17 @@ class BaseA2AAgent(ABC):
         for skill in self.agent_card.skills:
             capabilities.extend(skill.tags)
 
+        # Use Docker self URL when available, else local URL
+        effective_url = settings.agent_self_url or self.agent_card.url
+
         payload = {
             "name": self.agent_card.name,
-            "url": self.agent_card.url,
+            "url": effective_url,
             "version": self.agent_card.version,
             "capabilities": list(set(capabilities)),  # deduplicate
-            "agent_card": self.agent_card.model_dump(mode="json"),
+            "agent_card": self.agent_card.model_copy(
+                update={"url": effective_url}
+            ).model_dump(mode="json"),
         }
 
         try:

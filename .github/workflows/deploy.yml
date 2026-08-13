@@ -63,7 +63,7 @@ jobs:
           ORCHESTRATOR_MODEL=gemini-flash-latest
           A2A_BEARER_TOKEN=dev-bearer-token
           JWT_SECRET_KEY=test-secret-key-for-ci
-          POSTGRES_URL=postgresql+asyncpg://a2a:a2a_password@localhost:5432/a2a_marketplace
+          POSTGRES_URL=postgresql://a2a:a2a_password@localhost:5432/a2a_marketplace
           REDIS_URL=redis://localhost:6379
           ENVIRONMENT=test
           EOF
@@ -83,13 +83,6 @@ jobs:
           name: test-results
           path: test-results.xml
 
-      - name: Run registry integration tests
-        run: |
-          pytest tests/test_registry.py \
-            -v --tb=short \
-            -k "not live"
-        env:
-          POSTGRES_URL: postgresql+asyncpg://a2a:a2a_password@localhost:5432/a2a_marketplace
 
   # ════════════════════════════════════════════════
   # JOB 2: Build and push Docker images

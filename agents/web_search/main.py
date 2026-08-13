@@ -12,7 +12,8 @@ Serves:
 
 from __future__ import annotations
 import asyncio
-from contextlib import asynccontextmanager
+import httpx
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -332,6 +333,62 @@ async def run_agent_with_tools(task_message: str) -> str:
     )
     return final_text
 
+
+# ── Registry integration ──────────────────────────────────────
+
+async def _register_with_registry() -> None:
+    capabilities: list[str] = []
+    for skill in AGENT_CARD.skills:
+        capabilities.extend(skill.tags)
+
+    payload = {
+        "name": AGENT_CARD.name,
+        "url": AGENT_CARD.url,
+        "version": AGENT_CARD.version,
+        "capabilities": list(set(capabilities)),
+        "agent_card": AGENT_CARD.model_dump(mode="json"),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{settings.registry_url}/agents/register",
+                json=payload,
+            )
+            if resp.status_code == 200:
+                logger.info("registered_with_registry",
+                            registry=settings.registry_url)
+            else:
+                logger.warning("registry_registration_failed",
+                               status=resp.status_code)
+    except Exception as e:
+        logger.warning("registry_unavailable", error=str(e))
+
+
+async def _deregister_from_registry() -> None:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.delete(
+                f"{settings.registry_url}/agents/{AGENT_CARD.name}"
+            )
+            logger.info("deregistered_from_registry")
+    except Exception as e:
+        logger.warning("deregister_failed", error=str(e))
+
+
+async def _heartbeat_loop() -> None:
+    while True:
+        await asyncio.sleep(30)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.put(
+                    f"{settings.registry_url}/agents"
+                    f"/{AGENT_CARD.name}/heartbeat",
+                    json={"status": "active"},
+                )
+                logger.debug("heartbeat_sent")
+        except Exception:
+            logger.debug("heartbeat_failed")
+
 # ══════════════════════════════════════════════════════════════
 # FASTAPI APPLICATION
 # ══════════════════════════════════════════════════════════════
@@ -341,10 +398,18 @@ async def lifespan(app: FastAPI):
     logger.info(
         "web_search_agent_starting",
         port=settings.web_search_agent_port,
-        environment=settings.environment
+        environment=settings.environment,
     )
-    yield
-    logger.info("web_search_agent_stopping")
+    await _register_with_registry()
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    try:
+        yield
+    finally:
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
+        await _deregister_from_registry()
+        logger.info("web_search_agent_stopping")
 
 
 app = FastAPI(

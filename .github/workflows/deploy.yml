@@ -1,0 +1,411 @@
+# .github/workflows/deploy.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ secrets.GCP_REGION }}
+  AR_REPO: a2a-marketplace
+  REGISTRY: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/a2a-marketplace
+
+permissions:
+  contents: read
+  id-token: write   # Required for Workload Identity
+
+jobs:
+  # ════════════════════════════════════════════════
+  # JOB 1: Run all unit tests
+  # ════════════════════════════════════════════════
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: a2a
+          POSTGRES_PASSWORD: a2a_password
+          POSTGRES_DB: a2a_marketplace
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[web-search,data-analysis,document,code,dev]"
+
+      - name: Create test .env
+        run: |
+          cat > .env << EOF
+          GOOGLE_API_KEY=test-key-for-unit-tests
+          AGENT_MODEL=gemini-flash-lite-latest
+          ORCHESTRATOR_MODEL=gemini-flash-latest
+          A2A_BEARER_TOKEN=dev-bearer-token
+          JWT_SECRET_KEY=test-secret-key-for-ci
+          POSTGRES_URL=postgresql+asyncpg://a2a:a2a_password@localhost:5432/a2a_marketplace
+          REDIS_URL=redis://localhost:6379
+          ENVIRONMENT=test
+          EOF
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ \
+            -m "not integration" \
+            -v \
+            --tb=short \
+            --junit-xml=test-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+
+      - name: Run registry integration tests
+        run: |
+          pytest tests/test_registry.py \
+            -v --tb=short \
+            -k "not live"
+        env:
+          POSTGRES_URL: postgresql+asyncpg://a2a:a2a_password@localhost:5432/a2a_marketplace
+
+  # ════════════════════════════════════════════════
+  # JOB 2: Build and push Docker images
+  # Only runs on push to main (not PRs)
+  # ════════════════════════════════════════════════
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Generate image tag
+        id: meta
+        run: |
+          TAG="${GITHUB_SHA::8}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Image tag: $TAG"
+
+      - name: Build and push all images
+        run: |
+          TAG=${{ steps.meta.outputs.tag }}
+          REGISTRY=${{ env.REGISTRY }}
+
+          # Build all images in parallel
+          declare -A SERVICES=(
+            ["registry"]="registry/Dockerfile"
+            ["web-search-agent"]="agents/web_search/Dockerfile"
+            ["data-analysis-agent"]="agents/data_analysis/Dockerfile"
+            ["document-agent"]="agents/document/Dockerfile"
+            ["code-agent"]="agents/code/Dockerfile"
+            ["orchestrator"]="orchestrator/Dockerfile"
+          )
+
+          for service in "${!SERVICES[@]}"; do
+            dockerfile="${SERVICES[$service]}"
+            image="$REGISTRY/$service:$TAG"
+            latest="$REGISTRY/$service:latest"
+
+            echo "Building $service..."
+            docker build \
+              -f "$dockerfile" \
+              -t "$image" \
+              -t "$latest" \
+              --cache-from "$latest" \
+              . &
+          done
+
+          # Wait for all builds
+          wait
+          echo "All images built"
+
+          # Push all images
+          for service in "${!SERVICES[@]}"; do
+            TAG_IMG="$REGISTRY/$service:$TAG"
+            LATEST_IMG="$REGISTRY/$service:latest"
+            docker push "$TAG_IMG" &
+            docker push "$LATEST_IMG" &
+          done
+
+          wait
+          echo "All images pushed"
+
+  # ════════════════════════════════════════════════
+  # JOB 3: Deploy to Cloud Run
+  # ════════════════════════════════════════════════
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    environment:
+      name: production
+      url: ${{ steps.get-orchestrator-url.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Registry
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          IMAGE="${{ env.REGISTRY }}/registry:$TAG"
+
+          gcloud run deploy a2a-registry \
+            --image="$IMAGE" \
+            --region="${{ env.REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=9000 \
+            --memory=512Mi \
+            --cpu=1 \
+            --min-instances=1 \
+            --max-instances=3 \
+            --set-cloudsql-instances="${{ secrets.DB_CONNECTION_NAME }}" \
+            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
+            --set-secrets="POSTGRES_URL=POSTGRES_URL:latest,A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
+            --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,REGISTRY_PORT=9000" \
+            --project="${{ env.PROJECT_ID }}"
+
+      - name: Get Registry URL
+        id: registry-url
+        run: |
+          URL=$(gcloud run services describe a2a-registry \
+            --region="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --format="value(status.url)")
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Registry URL: $URL"
+
+      - name: Deploy Specialist Agents
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          REGISTRY_URL=${{ steps.registry-url.outputs.url }}
+          BEARER_TOKEN_REF="A2A_BEARER_TOKEN:latest"
+
+          deploy_agent() {
+            local name=$1
+            local image_name=$2
+            local port=$3
+            local extra_secrets=$4
+            local extra_env=$5
+
+            IMAGE="${{ env.REGISTRY }}/$image_name:$TAG"
+            SELF_URL_PLACEHOLDER="SELF_URL_$name"
+
+            gcloud run deploy "$name" \
+              --image="$IMAGE" \
+              --region="${{ env.REGION }}" \
+              --platform=managed \
+              --no-allow-unauthenticated \
+              --port="$port" \
+              --memory=512Mi \
+              --cpu=1 \
+              --min-instances=0 \
+              --max-instances=5 \
+              --concurrency=10 \
+              --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
+              --set-secrets="A2A_BEARER_TOKEN=$BEARER_TOKEN_REF,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,AGENT_MODEL=AGENT_MODEL:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest$extra_secrets" \
+              --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,REGISTRY_URL=$REGISTRY_URL$extra_env" \
+              --project="${{ env.PROJECT_ID }}"
+
+            # Get deployed URL and update AGENT_SELF_URL
+            SERVICE_URL=$(gcloud run services describe "$name" \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --format="value(status.url)")
+
+            # Update with actual self URL
+            gcloud run services update "$name" \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --update-env-vars="AGENT_SELF_URL=$SERVICE_URL"
+
+            echo "$name deployed at: $SERVICE_URL"
+          }
+
+          # Deploy all agents
+          deploy_agent "a2a-web-search-agent" \
+            "web-search-agent" \
+            "8001" \
+            ",GOOGLE_SEARCH_API_KEY=GOOGLE_SEARCH_API_KEY:latest,GOOGLE_SEARCH_ENGINE_ID=GOOGLE_SEARCH_ENGINE_ID:latest" \
+            ",WEB_SEARCH_AGENT_PORT=8001"
+
+          deploy_agent "a2a-data-analysis-agent" \
+            "data-analysis-agent" \
+            "8002" \
+            "" \
+            ",DATA_ANALYSIS_AGENT_PORT=8002,MPLBACKEND=Agg"
+
+          deploy_agent "a2a-document-agent" \
+            "document-agent" \
+            "8003" \
+            "" \
+            ",DOCUMENT_AGENT_PORT=8003"
+
+          deploy_agent "a2a-code-agent" \
+            "code-agent" \
+            "8004" \
+            "" \
+            ",CODE_AGENT_PORT=8004,TMPDIR=/tmp"
+
+      - name: Get Agent URLs
+        id: agent-urls
+        run: |
+          get_url() {
+            gcloud run services describe "$1" \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --format="value(status.url)"
+          }
+
+          WEB_SEARCH_URL=$(get_url "a2a-web-search-agent")
+          DATA_ANALYSIS_URL=$(get_url "a2a-data-analysis-agent")
+          DOCUMENT_URL=$(get_url "a2a-document-agent")
+          CODE_URL=$(get_url "a2a-code-agent")
+
+          echo "web_search=$WEB_SEARCH_URL" >> $GITHUB_OUTPUT
+          echo "data_analysis=$DATA_ANALYSIS_URL" >> $GITHUB_OUTPUT
+          echo "document=$DOCUMENT_URL" >> $GITHUB_OUTPUT
+          echo "code=$CODE_URL" >> $GITHUB_OUTPUT
+
+      - name: Deploy Orchestrator
+        run: |
+          TAG=${{ needs.build.outputs.image-tag }}
+          IMAGE="${{ env.REGISTRY }}/orchestrator:$TAG"
+          REGISTRY_URL=${{ steps.registry-url.outputs.url }}
+
+          gcloud run deploy a2a-orchestrator \
+            --image="$IMAGE" \
+            --region="${{ env.REGION }}" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --port=8000 \
+            --memory=1Gi \
+            --cpu=2 \
+            --min-instances=0 \
+            --max-instances=3 \
+            --concurrency=5 \
+            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
+            --set-secrets="A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,ORCHESTRATOR_MODEL=ORCHESTRATOR_MODEL:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
+            --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,ORCHESTRATOR_PORT=8000,REGISTRY_URL=$REGISTRY_URL" \
+            --project="${{ env.PROJECT_ID }}"
+
+          ORCH_URL=$(gcloud run services describe a2a-orchestrator \
+            --region="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --format="value(status.url)")
+
+          gcloud run services update a2a-orchestrator \
+            --region="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --update-env-vars="AGENT_SELF_URL=$ORCH_URL"
+
+          echo "Orchestrator deployed at: $ORCH_URL"
+
+      - name: Get Orchestrator URL
+        id: get-orchestrator-url
+        run: |
+          URL=$(gcloud run services describe a2a-orchestrator \
+            --region="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --format="value(status.url)")
+          echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Smoke Tests Against GCP
+        run: |
+          ORCH_URL=${{ steps.get-orchestrator-url.outputs.url }}
+          REGISTRY_URL=${{ steps.registry-url.outputs.url }}
+          BEARER="${{ secrets.A2A_BEARER_TOKEN }}"
+
+          echo "Running smoke tests..."
+
+          # Test 1: Registry health
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$REGISTRY_URL/health")
+          [[ "$STATUS" == "200" ]] && \
+            echo "✅ Registry healthy" || \
+            echo "❌ Registry unhealthy: $STATUS"
+
+          # Test 2: Orchestrator health
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$ORCH_URL/health")
+          [[ "$STATUS" == "200" ]] && \
+            echo "✅ Orchestrator healthy" || \
+            echo "❌ Orchestrator unhealthy: $STATUS"
+
+          # Test 3: Agent Card accessible
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "$ORCH_URL/.well-known/agent.json")
+          [[ "$STATUS" == "200" ]] && \
+            echo "✅ Agent card served" || \
+            echo "❌ Agent card failed: $STATUS"
+
+          echo "Smoke tests complete"
+          echo ""
+          echo "🚀 Deployment successful!"
+          echo "Orchestrator: $ORCH_URL"
+          echo "Registry:     $REGISTRY_URL"
+
+      - name: Post deployment summary
+        run: |
+          echo "## 🚀 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Orchestrator | ${{ steps.get-orchestrator-url.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | ${{ steps.registry-url.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** \`${{ needs.build.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY

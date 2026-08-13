@@ -1,0 +1,51 @@
+# deploy/cloudrun/registry.yaml
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: a2a-registry
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/cloudsql-instances: "PROJECT_ID:REGION:a2a-postgres"
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "3"
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT
+      containers:
+        - image: IMAGE_URL
+          ports:
+            - containerPort: 9000
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: "1"
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: LOG_LEVEL
+              value: INFO
+            - name: REGISTRY_PORT
+              value: "9000"
+            - name: POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: POSTGRES_URL
+                  key: latest
+            - name: A2A_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: A2A_BEARER_TOKEN
+                  key: latest
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: JWT_SECRET_KEY
+                  key: latest
+          livenessProbe:
+            httpGet:
+              path: /health
+            initialDelaySeconds: 10
+            periodSeconds: 30

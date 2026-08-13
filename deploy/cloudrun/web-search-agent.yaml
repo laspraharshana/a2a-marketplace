@@ -1,0 +1,64 @@
+# deploy/cloudrun/web-search-agent.yaml
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: a2a-web-search-agent
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "5"
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT
+      containers:
+        - image: IMAGE_URL
+          ports:
+            - containerPort: 8001
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: "1"
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: LOG_LEVEL
+              value: INFO
+            - name: WEB_SEARCH_AGENT_PORT
+              value: "8001"
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: GOOGLE_API_KEY
+                  key: latest
+            - name: GOOGLE_SEARCH_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: GOOGLE_SEARCH_API_KEY
+                  key: latest
+            - name: GOOGLE_SEARCH_ENGINE_ID
+              valueFrom:
+                secretKeyRef:
+                  name: GOOGLE_SEARCH_ENGINE_ID
+                  key: latest
+            - name: AGENT_MODEL
+              valueFrom:
+                secretKeyRef:
+                  name: AGENT_MODEL
+                  key: latest
+            - name: A2A_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: A2A_BEARER_TOKEN
+                  key: latest
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: JWT_SECRET_KEY
+                  key: latest
+            - name: REGISTRY_URL
+              value: REGISTRY_SERVICE_URL
+            - name: AGENT_SELF_URL
+              value: SELF_SERVICE_URL

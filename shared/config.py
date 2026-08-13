@@ -75,6 +75,18 @@ class Settings(BaseSettings):
     registry_url: str = Field(default="http://localhost:9000")
 
 
+    # ── Service Discovery ────────────────────────────────────────
+    registry_url: str = Field(
+        default="http://localhost:9000",
+        description="Registry URL (overridden in Docker)"
+    )
+    agent_self_url: str | None = Field(
+        default=None,
+        description="This agent's public URL for registry registration"
+                    " (set via AGENT_SELF_URL in Docker Compose)"
+    )
+
+
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()

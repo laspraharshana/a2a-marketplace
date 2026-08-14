@@ -12,6 +12,7 @@ Serves:
 
 from __future__ import annotations
 import asyncio
+import os
 import httpx
 from contextlib import asynccontextmanager, suppress
 
@@ -60,11 +61,6 @@ security = HTTPBearer(auto_error=False)
 def verify_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(security)
 ) -> str:
-    """
-    Verify A2A Bearer token.
-    Reads token fresh from settings each call.
-    """
-    # Read fresh each call — avoids cache issues
     from shared.config import get_settings
     current_settings = get_settings()
     expected_token = current_settings.a2a_bearer_token
@@ -75,24 +71,29 @@ def verify_bearer_token(
             detail="Missing Authorization header",
             headers={"WWW-Authenticate": "Bearer"}
         )
-
     if credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=401,
             detail="Invalid authentication scheme. Use Bearer",
             headers={"WWW-Authenticate": "Bearer"}
         )
-
     if credentials.credentials != expected_token:
         raise HTTPException(
             status_code=401,
             detail="Invalid bearer token",
             headers={"WWW-Authenticate": "Bearer"}
         )
-
     return credentials.credentials
 
+
 # ── Agent Card ────────────────────────────────────────────────
+# Read AGENT_SELF_URL at module load time.
+# Set by Docker Compose / Cloud Run to the service's reachable URL.
+# Falls back to localhost for local dev without Docker.
+_self_url = (
+    os.environ.get("AGENT_SELF_URL")
+    or f"http://localhost:{settings.web_search_agent_port}"
+)
 
 AGENT_CARD = AgentCard(
     name="web-search-agent",
@@ -101,7 +102,7 @@ AGENT_CARD = AgentCard(
         "Searches the web, fetches news, and reads URLs. "
         "Uses Gemini with MCP tools to synthesize results."
     ),
-    url=f"http://localhost:{settings.web_search_agent_port}",
+    url=_self_url,
     version="1.0.0",
     provider=AgentProvider(
         organization="A2A Marketplace",
@@ -162,15 +163,6 @@ AGENT_CARD = AgentCard(
 # ══════════════════════════════════════════════════════════════
 
 async def run_agent_with_tools(task_message: str) -> str:
-    """
-    Run Gemini with MCP tools to handle a task.
-
-    IMPROVEMENTS:
-    - Tracks all tool results across iterations
-    - If max iterations hit, synthesizes from
-      whatever data was collected
-    - Prevents "no summary" when DDG rate limits
-    """
     client = genai.Client(api_key=settings.google_api_key)
 
     gemini_tools = genai_types.Tool(
@@ -198,7 +190,6 @@ async def run_agent_with_tools(task_message: str) -> str:
     max_iterations = 5
     iteration = 0
     response = None
-    # Track ALL tool results across iterations
     all_tool_results: list[str] = []
 
     while iteration < max_iterations:
@@ -222,17 +213,13 @@ async def run_agent_with_tools(task_message: str) -> str:
         )
 
         if not response.candidates:
-            logger.warning(
-                "gemini_no_candidates",
-                iteration=iteration
-            )
+            logger.warning("gemini_no_candidates", iteration=iteration)
             break
 
         candidate = response.candidates[0]
         response_content = candidate.content
         messages.append(response_content)
 
-        # Extract function calls
         function_calls = [
             part.function_call
             for part in response_content.parts
@@ -241,27 +228,18 @@ async def run_agent_with_tools(task_message: str) -> str:
         ]
 
         if not function_calls:
-            # No tool calls — Gemini has final answer
             logger.info("gemini_finished", iterations=iteration)
             break
 
-        # Execute all tool calls
         function_response_parts = []
         for fc in function_calls:
             tool_name = fc.name
             tool_args = dict(fc.args)
 
-            logger.info(
-                "gemini_tool_call",
-                tool=tool_name,
-                iteration=iteration
-            )
+            logger.info("gemini_tool_call", tool=tool_name, iteration=iteration)
 
-            result_text = await execute_mcp_tool(
-                tool_name, tool_args
-            )
+            result_text = await execute_mcp_tool(tool_name, tool_args)
 
-            # Track results for fallback synthesis
             if not result_text.startswith("Error") and \
                "No search results" not in result_text:
                 all_tool_results.append(result_text)
@@ -282,20 +260,17 @@ async def run_agent_with_tools(task_message: str) -> str:
             )
         )
 
-    # ── Extract final text ────────────────────────────────────
     final_text = ""
     if response and response.candidates:
         for part in response.candidates[0].content.parts:
             if hasattr(part, 'text') and part.text:
                 final_text += part.text
 
-    # ── Fallback: synthesize from collected results ───────────
     if not final_text and all_tool_results:
         logger.info(
             "using_fallback_synthesis",
             collected_results=len(all_tool_results)
         )
-        # Ask Gemini to synthesize from what we collected
         combined_data = "\n\n---\n\n".join(all_tool_results)
         synthesis_prompt = (
             f"Based on the following search results, "
@@ -307,16 +282,13 @@ async def run_agent_with_tools(task_message: str) -> str:
             client.models.generate_content,
             model=settings.agent_model,
             contents=synthesis_prompt,
-            config=genai_types.GenerateContentConfig(
-                temperature=0.1
-            )
+            config=genai_types.GenerateContentConfig(temperature=0.1)
         )
         if synthesis_response.candidates:
             for part in synthesis_response.candidates[0].content.parts:
                 if hasattr(part, 'text') and part.text:
                     final_text += part.text
 
-    # ── Last resort ───────────────────────────────────────────
     if not final_text:
         final_text = (
             f"I searched for '{task_message}' but was unable "
@@ -343,10 +315,10 @@ async def _register_with_registry() -> None:
 
     payload = {
         "name": AGENT_CARD.name,
-        "url": AGENT_CARD.url,
+        "url": AGENT_CARD.url,           # correct — AGENT_CARD.url = _self_url
         "version": AGENT_CARD.version,
         "capabilities": list(set(capabilities)),
-        "agent_card": AGENT_CARD.model_dump(mode="json"),
+        "agent_card": AGENT_CARD.model_dump(mode="json"),  # correct — url already set
     }
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -355,11 +327,16 @@ async def _register_with_registry() -> None:
                 json=payload,
             )
             if resp.status_code == 200:
-                logger.info("registered_with_registry",
-                            registry=settings.registry_url)
+                logger.info(
+                    "registered_with_registry",
+                    registry=settings.registry_url,
+                    url=AGENT_CARD.url,
+                )
             else:
-                logger.warning("registry_registration_failed",
-                               status=resp.status_code)
+                logger.warning(
+                    "registry_registration_failed",
+                    status=resp.status_code,
+                )
     except Exception as e:
         logger.warning("registry_unavailable", error=str(e))
 
@@ -389,6 +366,7 @@ async def _heartbeat_loop() -> None:
         except Exception:
             logger.debug("heartbeat_failed")
 
+
 # ══════════════════════════════════════════════════════════════
 # FASTAPI APPLICATION
 # ══════════════════════════════════════════════════════════════
@@ -397,7 +375,7 @@ async def _heartbeat_loop() -> None:
 async def lifespan(app: FastAPI):
     logger.info(
         "web_search_agent_starting",
-        port=settings.web_search_agent_port,
+        url=AGENT_CARD.url,
         environment=settings.environment,
     )
     await _register_with_registry()
@@ -420,14 +398,8 @@ app = FastAPI(
 )
 
 
-# ── Endpoints ─────────────────────────────────────────────────
-
-@app.get(
-    "/.well-known/agent.json",
-    include_in_schema=False
-)
+@app.get("/.well-known/agent.json", include_in_schema=False)
 async def get_agent_card() -> dict:
-    """Public — no auth needed. Orchestrator reads this."""
     return AGENT_CARD.model_dump(exclude_none=True)
 
 
@@ -445,29 +417,18 @@ async def send_task(
     request: JSONRPCRequest,
     _token: str = Depends(verify_bearer_token)
 ) -> JSONRPCResponse:
-    """
-    A2A: tasks/send
-    Receives task, runs Gemini agent, returns result.
-    """
     try:
         params = TaskSendParams(**request.params)
 
-        # Extract text from message parts
         task_text = ""
         for part in params.message.parts:
-            if isinstance(part, dict) and \
-               part.get("type") == "text":
+            if isinstance(part, dict) and part.get("type") == "text":
                 task_text += part.get("text", "")
             elif hasattr(part, 'text'):
                 task_text += part.text
 
-        logger.info(
-            "task_received",
-            task_id=params.id,
-            preview=task_text[:100]
-        )
+        logger.info("task_received", task_id=params.id, preview=task_text[:100])
 
-        # Store as working
         task = Task(
             id=params.id,
             sessionId=params.sessionId,
@@ -475,29 +436,21 @@ async def send_task(
                 state=TaskState.WORKING,
                 message=Message(
                     role="agent",
-                    parts=[TextPart(
-                        type="text",
-                        text="Searching the web..."
-                    )]
+                    parts=[TextPart(type="text", text="Searching the web...")]
                 )
             ),
             history=[params.message]
         )
         _task_store[task.id] = task
 
-        # Run agent
         result_text = await run_agent_with_tools(task_text)
 
-        # Mark completed with artifact
         task.status = TaskStatus(state=TaskState.COMPLETED)
         task.artifacts = [
             Artifact(
                 name="search_results",
                 description="Web search results and synthesis",
-                parts=[TextPart(
-                    type="text",
-                    text=result_text
-                )]
+                parts=[TextPart(type="text", text=result_text)]
             )
         ]
         _task_store[task.id] = task
@@ -525,10 +478,8 @@ async def get_task(
     request: JSONRPCRequest,
     _token: str = Depends(verify_bearer_token)
 ) -> JSONRPCResponse:
-    """A2A: tasks/get — retrieve task by ID"""
     task_id = request.params.get("id")
     task = _task_store.get(task_id)
-
     if not task:
         return JSONRPCResponse(
             id=request.id,
@@ -537,7 +488,6 @@ async def get_task(
                 message=f"Task {task_id} not found"
             )
         )
-
     return JSONRPCResponse(
         id=request.id,
         result=task.model_dump(exclude_none=True)
@@ -549,10 +499,8 @@ async def cancel_task(
     request: JSONRPCRequest,
     _token: str = Depends(verify_bearer_token)
 ) -> JSONRPCResponse:
-    """A2A: tasks/cancel"""
     task_id = request.params.get("id")
     task = _task_store.get(task_id)
-
     if not task:
         return JSONRPCResponse(
             id=request.id,
@@ -561,10 +509,8 @@ async def cancel_task(
                 message=f"Task {task_id} not found"
             )
         )
-
     task.status = TaskStatus(state=TaskState.CANCELED)
     _task_store[task_id] = task
-
     return JSONRPCResponse(
         id=request.id,
         result=task.model_dump(exclude_none=True)

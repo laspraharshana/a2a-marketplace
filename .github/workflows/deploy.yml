@@ -15,7 +15,7 @@ env:
 
 permissions:
   contents: read
-  id-token: write   # Required for Workload Identity
+  id-token: write
 
 jobs:
   # ════════════════════════════════════════════════
@@ -86,7 +86,6 @@ jobs:
 
   # ════════════════════════════════════════════════
   # JOB 2: Build and push Docker images
-  # Only runs on push to main (not PRs)
   # ════════════════════════════════════════════════
   build:
     name: Build & Push Images
@@ -126,7 +125,6 @@ jobs:
           TAG=${{ steps.meta.outputs.tag }}
           REGISTRY=${{ env.REGISTRY }}
 
-          # Build all images in parallel
           declare -A SERVICES=(
             ["registry"]="registry/Dockerfile"
             ["web-search-agent"]="agents/web_search/Dockerfile"
@@ -150,20 +148,17 @@ jobs:
               . &
           done
 
-          # Wait for all builds
           wait
           echo "All images built"
 
-          # Push all images
           for service in "${!SERVICES[@]}"; do
-            TAG_IMG="$REGISTRY/$service:$TAG"
-            LATEST_IMG="$REGISTRY/$service:latest"
-            docker push "$TAG_IMG" &
-            docker push "$LATEST_IMG" &
+            docker push "$REGISTRY/$service:$TAG" &
+            docker push "$REGISTRY/$service:latest" &
           done
 
           wait
           echo "All images pushed"
+
 
   # ════════════════════════════════════════════════
   # JOB 3: Deploy to Cloud Run
@@ -191,6 +186,7 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
+      # ── Registry (deployed first, min=1, always up) ──────────────────
       - name: Deploy Registry
         run: |
           TAG=${{ needs.build.outputs.image-tag }}
@@ -224,11 +220,15 @@ jobs:
           echo "url=$URL" >> $GITHUB_OUTPUT
           echo "Registry URL: $URL"
 
+      # ── Specialist Agents ─────────────────────────────────────────────
+      # KEY FIX: Get existing URL BEFORE deploy so AGENT_SELF_URL is
+      # correct in the first revision. Cloud Run URLs never change.
+      # On first-ever deploy the URL is empty → deploy without it →
+      # immediately update. All subsequent deploys get URL upfront.
       - name: Deploy Specialist Agents
         run: |
           TAG=${{ needs.build.outputs.image-tag }}
           REGISTRY_URL=${{ steps.registry-url.outputs.url }}
-          BEARER_TOKEN_REF="A2A_BEARER_TOKEN:latest"
 
           deploy_agent() {
             local name=$1
@@ -238,40 +238,53 @@ jobs:
             local extra_env=$5
 
             IMAGE="${{ env.REGISTRY }}/$image_name:$TAG"
-            SELF_URL_PLACEHOLDER="SELF_URL_$name"
+
+            # Get stable URL BEFORE deploying new revision.
+            # On first deploy this returns empty string.
+            SELF_URL=$(gcloud run services describe "$name" \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --format="value(status.url)" 2>/dev/null || echo "")
+
+            echo "Deploying $name (self_url='$SELF_URL')..."
 
             gcloud run deploy "$name" \
               --image="$IMAGE" \
               --region="${{ env.REGION }}" \
               --platform=managed \
-              --no-allow-unauthenticated \
+              --allow-unauthenticated \
               --port="$port" \
               --memory=512Mi \
               --cpu=1 \
               --min-instances=0 \
               --max-instances=5 \
               --concurrency=10 \
+              --timeout=300 \
+              --cpu-boost \
               --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
-              --set-secrets="A2A_BEARER_TOKEN=$BEARER_TOKEN_REF,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,AGENT_MODEL=AGENT_MODEL:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest$extra_secrets" \
-              --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,REGISTRY_URL=$REGISTRY_URL$extra_env" \
+              --set-secrets="A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,AGENT_MODEL=AGENT_MODEL:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest$extra_secrets" \
+              --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,REGISTRY_URL=$REGISTRY_URL,AGENT_SELF_URL=$SELF_URL$extra_env" \
               --project="${{ env.PROJECT_ID }}"
 
-            # Get deployed URL and update AGENT_SELF_URL
-            SERVICE_URL=$(gcloud run services describe "$name" \
-              --region="${{ env.REGION }}" \
-              --project="${{ env.PROJECT_ID }}" \
-              --format="value(status.url)")
+            # First-ever deploy: SELF_URL was empty, fix it now.
+            # URL is stable so this is the only time we need this path.
+            if [ -z "$SELF_URL" ]; then
+              SELF_URL=$(gcloud run services describe "$name" \
+                --region="${{ env.REGION }}" \
+                --project="${{ env.PROJECT_ID }}" \
+                --format="value(status.url)")
 
-            # Update with actual self URL
-            gcloud run services update "$name" \
-              --region="${{ env.REGION }}" \
-              --project="${{ env.PROJECT_ID }}" \
-              --update-env-vars="AGENT_SELF_URL=$SERVICE_URL"
+              echo "First deploy of $name — updating AGENT_SELF_URL to $SELF_URL"
 
-            echo "$name deployed at: $SERVICE_URL"
+              gcloud run services update "$name" \
+                --region="${{ env.REGION }}" \
+                --project="${{ env.PROJECT_ID }}" \
+                --update-env-vars="AGENT_SELF_URL=$SELF_URL"
+            fi
+
+            echo "$name ready at: $SELF_URL"
           }
 
-          # Deploy all agents
           deploy_agent "a2a-web-search-agent" \
             "web-search-agent" \
             "8001" \
@@ -296,31 +309,17 @@ jobs:
             "" \
             ",CODE_AGENT_PORT=8004,TMPDIR=/tmp"
 
-      - name: Get Agent URLs
-        id: agent-urls
-        run: |
-          get_url() {
-            gcloud run services describe "$1" \
-              --region="${{ env.REGION }}" \
-              --project="${{ env.PROJECT_ID }}" \
-              --format="value(status.url)"
-          }
-
-          WEB_SEARCH_URL=$(get_url "a2a-web-search-agent")
-          DATA_ANALYSIS_URL=$(get_url "a2a-data-analysis-agent")
-          DOCUMENT_URL=$(get_url "a2a-document-agent")
-          CODE_URL=$(get_url "a2a-code-agent")
-
-          echo "web_search=$WEB_SEARCH_URL" >> $GITHUB_OUTPUT
-          echo "data_analysis=$DATA_ANALYSIS_URL" >> $GITHUB_OUTPUT
-          echo "document=$DOCUMENT_URL" >> $GITHUB_OUTPUT
-          echo "code=$CODE_URL" >> $GITHUB_OUTPUT
-
+      # ── Orchestrator (deployed last, needs agent URLs in registry) ────
       - name: Deploy Orchestrator
         run: |
           TAG=${{ needs.build.outputs.image-tag }}
           IMAGE="${{ env.REGISTRY }}/orchestrator:$TAG"
           REGISTRY_URL=${{ steps.registry-url.outputs.url }}
+
+          SELF_URL=$(gcloud run services describe a2a-orchestrator \
+            --region="${{ env.REGION }}" \
+            --project="${{ env.PROJECT_ID }}" \
+            --format="value(status.url)" 2>/dev/null || echo "")
 
           gcloud run deploy a2a-orchestrator \
             --image="$IMAGE" \
@@ -337,20 +336,22 @@ jobs:
             --cpu-boost \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
             --set-secrets="A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,ORCHESTRATOR_MODEL=ORCHESTRATOR_MODEL:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
-            --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,ORCHESTRATOR_PORT=8000,REGISTRY_URL=$REGISTRY_URL" \
+            --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,ORCHESTRATOR_PORT=8000,REGISTRY_URL=$REGISTRY_URL,AGENT_SELF_URL=$SELF_URL" \
             --project="${{ env.PROJECT_ID }}"
 
-          ORCH_URL=$(gcloud run services describe a2a-orchestrator \
-            --region="${{ env.REGION }}" \
-            --project="${{ env.PROJECT_ID }}" \
-            --format="value(status.url)")
+          if [ -z "$SELF_URL" ]; then
+            SELF_URL=$(gcloud run services describe a2a-orchestrator \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --format="value(status.url)")
 
-          gcloud run services update a2a-orchestrator \
-            --region="${{ env.REGION }}" \
-            --project="${{ env.PROJECT_ID }}" \
-            --update-env-vars="AGENT_SELF_URL=$ORCH_URL"
+            gcloud run services update a2a-orchestrator \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --update-env-vars="AGENT_SELF_URL=$SELF_URL"
+          fi
 
-          echo "Orchestrator deployed at: $ORCH_URL"
+          echo "Orchestrator ready at: $SELF_URL"
 
       - name: Get Orchestrator URL
         id: get-orchestrator-url
@@ -361,53 +362,112 @@ jobs:
             --format="value(status.url)")
           echo "url=$URL" >> $GITHUB_OUTPUT
 
-      - name: Wait for services to stabilize
+      # ── Wake agents so they register before smoke tests ───────────────
+      - name: Wake agents and wait for registration
         run: |
-          echo "Waiting 30s for agents to register..."
+          echo "Pinging all agents to trigger cold start + registration..."
+
+          for SERVICE in a2a-web-search-agent a2a-data-analysis-agent a2a-document-agent a2a-code-agent; do
+            URL=$(gcloud run services describe "$SERVICE" \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --format="value(status.url)")
+            echo -n "$SERVICE → "
+            curl -s --max-time 30 "$URL/health" | python3 -m json.tool 2>/dev/null || echo "cold (will register on first request)"
+          done
+
+          echo "Waiting 30s for agents to register with registry..."
           sleep 30
 
-      - name: Smoke Tests Against GCP
+          echo "Registry agent status:"
+          REGISTRY_URL=${{ steps.registry-url.outputs.url }}
+          curl -s "$REGISTRY_URL/agents" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for a in data['agents']:
+              print(f\"  {a['name']:30} {a['url']:60} {a['status']}\")
+          print(f\"  Total: {data['total']}, Active: {data['active_count']}\")
+          "
+
+      # ── Smoke tests ───────────────────────────────────────────────────
+      - name: Smoke Tests
         run: |
           ORCH_URL=${{ steps.get-orchestrator-url.outputs.url }}
           REGISTRY_URL=${{ steps.registry-url.outputs.url }}
           BEARER="${{ secrets.A2A_BEARER_TOKEN }}"
+          FAILED=0
 
-          echo "Running smoke tests..."
+          check() {
+            local label=$1
+            local status=$2
+            local expected=$3
+            if [[ "$status" == "$expected" ]]; then
+              echo "✅ $label"
+            else
+              echo "❌ $label (got $status, want $expected)"
+              FAILED=$((FAILED + 1))
+            fi
+          }
 
-          # Test 1: Registry health
+          # Registry health
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$REGISTRY_URL/health")
+          check "Registry /health" "$STATUS" "200"
+
+          # Orchestrator health
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$ORCH_URL/health")
+          check "Orchestrator /health" "$STATUS" "200"
+
+          # Orchestrator agent card (public endpoint)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$ORCH_URL/.well-known/agent.json")
+          check "Orchestrator agent card" "$STATUS" "200"
+
+          # Auth required on task endpoint
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "$REGISTRY_URL/health")
-          [[ "$STATUS" == "200" ]] && \
-            echo "✅ Registry healthy" || \
-            echo "❌ Registry unhealthy: $STATUS"
+            -X POST "$ORCH_URL/a2a/tasks/send" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          check "Task endpoint requires auth" "$STATUS" "401"
 
-          # Test 2: Orchestrator health
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "$ORCH_URL/health")
-          [[ "$STATUS" == "200" ]] && \
-            echo "✅ Orchestrator healthy" || \
-            echo "❌ Orchestrator unhealthy: $STATUS"
+          # Agent health checks (now public)
+          for SERVICE in a2a-web-search-agent a2a-data-analysis-agent a2a-document-agent a2a-code-agent; do
+            URL=$(gcloud run services describe "$SERVICE" \
+              --region="${{ env.REGION }}" \
+              --project="${{ env.PROJECT_ID }}" \
+              --format="value(status.url)")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$URL/health")
+            check "$SERVICE /health" "$STATUS" "200"
+          done
 
-          # Test 3: Agent Card accessible
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            "$ORCH_URL/.well-known/agent.json")
-          [[ "$STATUS" == "200" ]] && \
-            echo "✅ Agent card served" || \
-            echo "❌ Agent card failed: $STATUS"
+          # Active agents in registry
+          ACTIVE=$(curl -s "$REGISTRY_URL/agents" | \
+            python3 -c "import json,sys; d=json.load(sys.stdin); print(d['active_count'])")
+          if [[ "$ACTIVE" -ge 3 ]]; then
+            echo "✅ Registry has $ACTIVE active agents"
+          else
+            echo "❌ Registry only has $ACTIVE active agents (want ≥3)"
+            FAILED=$((FAILED + 1))
+          fi
 
-          echo "Smoke tests complete"
           echo ""
-          echo "🚀 Deployment successful!"
-          echo "Orchestrator: $ORCH_URL"
-          echo "Registry:     $REGISTRY_URL"
+          if [[ "$FAILED" -eq 0 ]]; then
+            echo "All smoke tests passed ✅"
+          else
+            echo "$FAILED smoke test(s) failed ❌"
+            exit 1
+          fi
 
       - name: Post deployment summary
+        if: always()
         run: |
+          ORCH_URL=${{ steps.get-orchestrator-url.outputs.url }}
+          REGISTRY_URL=${{ steps.registry-url.outputs.url }}
+          TAG=${{ needs.build.outputs.image-tag }}
+
           echo "## 🚀 Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| Orchestrator | ${{ steps.get-orchestrator-url.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Registry | ${{ steps.registry-url.outputs.url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Orchestrator | $ORCH_URL |" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | $REGISTRY_URL |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image Tag:** \`${{ needs.build.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** \`$TAG\`" >> $GITHUB_STEP_SUMMARY

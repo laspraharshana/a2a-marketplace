@@ -102,24 +102,58 @@ async def health_check_loop(app: FastAPI) -> None:
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
-@asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    Startup: create DB pool with retries + start health checker.
+    Shutdown: cleanup background task + close pool.
+
+    Cloud SQL may take 5-15s to accept connections on cold start.
+    We retry with exponential backoff up to 5 times.
+    """
     setup_logging()
     logger.info("registry_starting", port=settings.registry_port)
 
-    # Database setup
-    pool = await create_pool(settings.postgres_url)
-    await init_db(pool)
-    app.state.pool = pool
-    logger.info("database_connected")
+    # ── Database setup with retry ─────────────────────────────
+    pool = None
+    max_retries = 5
 
-    # Start background health checker
+    for attempt in range(1, max_retries + 1):
+        try:
+            pool = await create_pool(settings.postgres_url)
+            await init_db(pool)
+            logger.info(
+                "database_connected",
+                attempt=attempt
+            )
+            break
+        except Exception as e:
+            logger.warning(
+                "database_connection_failed",
+                attempt=attempt,
+                max_retries=max_retries,
+                error=str(e)[:200]
+            )
+
+            if attempt >= max_retries:
+                logger.error(
+                    "database_connection_permanently_failed",
+                    total_attempts=attempt
+                )
+                raise  # Fail startup; Cloud Run will restart
+
+            # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+            wait_seconds = 2 ** (attempt - 1)
+            await asyncio.sleep(wait_seconds)
+
+    app.state.pool = pool
+
+    # ── Background health checker ─────────────────────────────
     checker_task = asyncio.create_task(health_check_loop(app))
     logger.info("health_checker_started")
 
     yield
 
-    # Shutdown
+    # ── Shutdown ──────────────────────────────────────────────
     checker_task.cancel()
     try:
         await checker_task

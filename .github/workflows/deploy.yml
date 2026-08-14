@@ -206,6 +206,8 @@ jobs:
             --cpu=1 \
             --min-instances=1 \
             --max-instances=3 \
+            --timeout=300 \                              # ← ADD (5min timeout)
+            --startup-cpu-boost \                        # ← ADD (faster startup)
             --set-cloudsql-instances="${{ secrets.DB_CONNECTION_NAME }}" \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
             --set-secrets="POSTGRES_URL=POSTGRES_URL:latest,A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
@@ -273,7 +275,7 @@ jobs:
           deploy_agent "a2a-web-search-agent" \
             "web-search-agent" \
             "8001" \
-            ",GOOGLE_SEARCH_API_KEY=GOOGLE_SEARCH_API_KEY:latest,GOOGLE_SEARCH_ENGINE_ID=GOOGLE_SEARCH_ENGINE_ID:latest" \
+            "" \
             ",WEB_SEARCH_AGENT_PORT=8001"
 
           deploy_agent "a2a-data-analysis-agent" \

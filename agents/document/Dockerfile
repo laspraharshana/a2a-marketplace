@@ -51,5 +51,4 @@ HEALTHCHECK \
     --retries=3 \
     CMD curl -f http://localhost:8003/health || exit 1
 
-CMD ["uvicorn", "agents.document.main:app", \
-     "--host", "0.0.0.0", "--port", "8003"]
+CMD exec uvicorn agents.document.main:app --host 0.0.0.0 --port ${PORT:-8003}

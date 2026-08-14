@@ -59,7 +59,7 @@ async def fetch_available_agents() -> list[dict]:
     Returns list of dicts with: name, url, description, skills.
     Empty list if registry is unreachable.
     """
-    registry_url = f"http://localhost:{settings.registry_port}"
+    registry_url = settings.registry_url
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{registry_url}/agents")

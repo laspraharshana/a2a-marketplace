@@ -207,7 +207,7 @@ jobs:
             --min-instances=1 \
             --max-instances=3 \
             --timeout=300 \
-            --startup-cpu-boost \
+            --cpu-boost \
             --set-cloudsql-instances="${{ secrets.DB_CONNECTION_NAME }}" \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
             --set-secrets="POSTGRES_URL=POSTGRES_URL:latest,A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
@@ -333,6 +333,8 @@ jobs:
             --min-instances=0 \
             --max-instances=3 \
             --concurrency=5 \
+            --timeout=300 \
+            --cpu-boost \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
             --set-secrets="A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,GOOGLE_API_KEY=GOOGLE_API_KEY:latest,ORCHESTRATOR_MODEL=ORCHESTRATOR_MODEL:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
             --set-env-vars="ENVIRONMENT=production,LOG_LEVEL=INFO,ORCHESTRATOR_PORT=8000,REGISTRY_URL=$REGISTRY_URL" \
@@ -358,6 +360,11 @@ jobs:
             --project="${{ env.PROJECT_ID }}" \
             --format="value(status.url)")
           echo "url=$URL" >> $GITHUB_OUTPUT
+
+      - name: Wait for services to stabilize
+        run: |
+          echo "Waiting 30s for agents to register..."
+          sleep 30
 
       - name: Smoke Tests Against GCP
         run: |

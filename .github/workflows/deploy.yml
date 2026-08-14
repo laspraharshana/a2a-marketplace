@@ -206,8 +206,8 @@ jobs:
             --cpu=1 \
             --min-instances=1 \
             --max-instances=3 \
-            --timeout=300 \                              # ← ADD (5min timeout)
-            --startup-cpu-boost \                        # ← ADD (faster startup)
+            --timeout=300 \                              
+            --startup-cpu-boost \                       
             --set-cloudsql-instances="${{ secrets.DB_CONNECTION_NAME }}" \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT }}" \
             --set-secrets="POSTGRES_URL=POSTGRES_URL:latest,A2A_BEARER_TOKEN=A2A_BEARER_TOKEN:latest,JWT_SECRET_KEY=JWT_SECRET_KEY:latest" \
